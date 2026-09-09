@@ -536,7 +536,7 @@ function saveGoals(g){ localStorage.setItem(GOAL_KEY,JSON.stringify(g)); }
    Fill WORKER_URL after deploying the Worker. Blank = local prototype mode
    (seed + localStorage, current behaviour). */
 const CONFIG = {
-  WORKER_URL: 'https://live-dashboard.yw924.workers.dev',   // no trailing slash
+  WORKER_URL: 'https://live-dashboard.am-043.workers.dev',   // no trailing slash
   LARK_APP_ID: 'cli_aacc98f79a385ee6',
 };
 const ONLINE = () => !!CONFIG.WORKER_URL && !PREVIEW;   // preview mode forces fully-local mode
