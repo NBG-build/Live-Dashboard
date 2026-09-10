@@ -286,6 +286,25 @@ function hostSegmentHours(h) {
   if (mins <= 0) mins += 24 * 60; // overnight session
   return mins / 60;
 }
+/* pricing evaluation — mirrors evalFlatFee/evalCommission in dashboard.html so /project-health
+   agrees with what Section 07 shows for a single project. Tiers are whole-band, not marginal. */
+function evalFlatFeeServer(fee, hours) {
+  if (!fee) return 0;
+  if (fee.mode === 'tiered') {
+    const t = (fee.tiers || []).find(t => hours >= Number(t.from || 0) && (t.to == null || t.to === '' || hours < Number(t.to)));
+    return t ? (Number(t.fee) || 0) : 0;
+  }
+  return (Number(fee.perHour) || 0) * hours;
+}
+function evalCommissionServer(comm, gmv) {
+  if (!comm) return 0;
+  if (comm.mode === 'tiered') {
+    const t = (comm.tiers || []).find(t => gmv >= Number(t.from || 0) && (t.to == null || t.to === '' || gmv < Number(t.to)));
+    const pct = t ? (Number(t.pct) || 0) / 100 : 0;
+    return gmv * pct;
+  }
+  return gmv * ((Number(comm.pct) || 0) / 100);
+}
 /* Which biweekly [start,end] pay period (paid on `payDate`, a Friday) a session date falls in.
    Period = the 14 days ending on the payDate itself (i.e. hours are paid the Friday they land in). */
 function payPeriodForDate(dateStr) {
@@ -704,6 +723,72 @@ export default {
         }));
         if (nPeriods) periods = periods.slice(-nPeriods);
         return json({ periods, anchor: PAY_ANCHOR, tiers: PAY_TIERS }, 200, origin);
+      }
+
+      /* ----- project health: per-project Revenue vs Host+Mod Cost, one call across all projects -----
+         Admin-only (same sensitivity class as /hostpay — it's built from payroll data, and comparing
+         cost across projects at once is more revealing than one project's own /project/cost). Revenue
+         uses each project's Project Settings pricing; Cost uses the same biweekly-rate-slice logic as
+         /hostpay's byProject breakdown, just rolled up to a single $ per project instead of per host. */
+      if (path === '/project-health' && request.method === 'GET') {
+        if (me.role !== 'admin') return json({ error: 'admin only' }, 403, origin);
+        const today = new Date().toISOString().slice(0, 10);
+        const start = url.searchParams.get('start') || today.slice(0, 7) + '-01';
+        const end = url.searchParams.get('end') || today;
+        const regs = await listAll(env, env.REGISTRY_TABLE_ID);
+        const periodMap = {}; // periodKey -> hostName -> { totalHours, byProjectInRange }
+        const proj = {}; // pid -> { name, hoursInRange, gmvInRange, pricing }
+        for (const r of regs) {
+          const pid = textVal(r.fields.projectId), tid = textVal(r.fields.tableId), name = textVal(r.fields.name) || pid;
+          if (!tid) continue;
+          let pricing = null;
+          try { pricing = JSON.parse(textVal(r.fields.pricingJson) || 'null'); } catch (e) {}
+          proj[pid] = { name, hoursInRange: 0, gmvInRange: 0, pricing };
+          const rows = await listAll(env, tid);
+          rows.forEach(row => {
+            const f = row.fields, date = textVal(f.date);
+            if (!date) return;
+            const inRangeDate = date >= start && date <= end;
+            if (inRangeDate) {
+              const rawH = numVal(f.durationSec) / 3600, waived = numVal(f.hoursWaived) || 0;
+              proj[pid].hoursInRange += Math.max(0, rawH - waived);
+              proj[pid].gmvInRange += numVal(f.gmv) || 0;
+            }
+            let hosts = [];
+            try { hosts = JSON.parse(textVal(f.hostsJson) || '[]'); } catch (e) {}
+            if (!hosts.length) return;
+            const per = payPeriodForDate(date), key = per.start + '|' + per.end;
+            if (!periodMap[key]) periodMap[key] = {};
+            hosts.forEach(h => {
+              const hname = String(h.name || '').trim().toUpperCase();
+              if (!hname) return;
+              const hrs = hostSegmentHours(h);
+              if (!periodMap[key][hname]) periodMap[key][hname] = { totalHours: 0, byProjectInRange: {} };
+              periodMap[key][hname].totalHours += hrs;
+              if (inRangeDate) periodMap[key][hname].byProjectInRange[pid] = (periodMap[key][hname].byProjectInRange[pid] || 0) + hrs;
+            });
+          });
+        }
+        const costByProject = {};
+        Object.values(periodMap).forEach(hosts => {
+          Object.values(hosts).forEach(h => {
+            const rate = hostRate(h.totalHours);
+            Object.entries(h.byProjectInRange).forEach(([pid, hrs]) => { costByProject[pid] = (costByProject[pid] || 0) + hrs * rate; });
+          });
+        });
+        const projects = Object.entries(proj).map(([pid, p]) => {
+          const revenue = evalFlatFeeServer(p.pricing && p.pricing.fee, p.hoursInRange) + evalCommissionServer(p.pricing && p.pricing.commission, p.gmvInRange);
+          const cost = Math.round((costByProject[pid] || 0) * 100) / 100;
+          const margin = Math.round((revenue - cost) * 100) / 100;
+          return {
+            projectId: pid, name: p.name,
+            hours: Math.round(p.hoursInRange * 100) / 100, gmv: Math.round(p.gmvInRange * 100) / 100,
+            revenue: Math.round(revenue * 100) / 100, cost, margin,
+            costRatio: revenue > 0 ? Math.round((cost / revenue) * 10000) / 100 : (cost > 0 ? null : 0), // null = cost with no revenue to compare against
+            hasPricing: !!(p.pricing && ((p.pricing.fee && (p.pricing.fee.mode === 'tiered' ? (p.pricing.fee.tiers || []).length : p.pricing.fee.perHour)) || (p.pricing.commission && (p.pricing.commission.mode === 'tiered' ? (p.pricing.commission.tiers || []).length : p.pricing.commission.pct)))),
+          };
+        }).sort((a, b) => (b.costRatio ?? 999) - (a.costRatio ?? 999));
+        return json({ start, end, projects }, 200, origin);
       }
 
       /* ----- goals ----- */
