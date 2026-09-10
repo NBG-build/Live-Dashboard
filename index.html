@@ -81,6 +81,12 @@ label.lb{font-size:11px;color:var(--muted);letter-spacing:.5px;text-transform:up
 /* host-pay table (Management view, admin) */
 .hp-period{margin-bottom:18px}
 .hp-period h4{margin:0 0 8px;font-size:12px;letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
+/* project health table (Management view, admin) */
+.health-badge{font-size:10px;font-weight:700;padding:2px 9px;border-radius:20px;letter-spacing:.5px;white-space:nowrap}
+.health-badge.good{color:#12160a;background:var(--neon)}
+.health-badge.watch{color:#1a1400;background:#e8c34a}
+.health-badge.risk{color:#fff;background:#7a2226}
+.health-badge.na{color:var(--muted);background:var(--panel2);border:1px solid var(--line)}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:13px}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:14px 15px;position:relative;overflow:hidden}
 .card.hi{border-color:var(--neon-dim)}
@@ -497,6 +503,11 @@ body.previewing #gate{display:none!important}
       <div class="sec-h"><span class="no">M4</span><h2>Host Pay</h2><span class="hint">Biweekly, paid Fridays · &lt;10h/period $35/h · 10–20h $45/h · 20h+ $60/h · admin only</span></div>
       <div class="panel"><div id="hostPayBox"><div class="emptyc">Loading…</div></div></div>
     </div>
+    <!-- M5 PROJECT HEALTH (admin only) — Revenue (Project Settings pricing) vs Host+Mod Cost, per project -->
+    <div class="sec" id="projHealthSec" style="display:none">
+      <div class="sec-h"><span class="no">M5</span><h2>Project Health — Revenue vs Cost</h2><span class="hint">Selected month · Cost ÷ Revenue ratio · admin only</span></div>
+      <div class="panel"><div id="projHealthBox"><div class="emptyc">Loading…</div></div></div>
+    </div>
     <div class="foot" id="mFoot"></div>
   </div>
 </div>
@@ -536,7 +547,7 @@ function saveGoals(g){ localStorage.setItem(GOAL_KEY,JSON.stringify(g)); }
    Fill WORKER_URL after deploying the Worker. Blank = local prototype mode
    (seed + localStorage, current behaviour). */
 const CONFIG = {
-  WORKER_URL: 'https://live-dashboard.am-043.workers.dev',   // no trailing slash
+  WORKER_URL: 'https://live-dashboard.yw924.workers.dev',   // no trailing slash
   LARK_APP_ID: 'cli_aacc98f79a385ee6',
 };
 const ONLINE = () => !!CONFIG.WORKER_URL && !PREVIEW;   // preview mode forces fully-local mode
@@ -738,6 +749,65 @@ function computeProjectCostLocal(pid,start,end){
   let cost=0,hostsInvolved=0;
   Object.values(periodMap).forEach(hosts=>{ Object.values(hosts).forEach(h=>{ if(h.inRange>0){ cost+=h.inRange*hostRateJS(h.totalHours); hostsInvolved++; } }); });
   return { cost:Math.round(cost*100)/100, hostsInvolved };
+}
+/* local (offline/demo) fallback for /project-health — per-project Revenue vs Host+Mod Cost */
+function computeProjectHealthLocal(start,end){
+  const db=loadDB(); const pricingAll=loadPricingLocal();
+  const periodMap={}; const proj={};
+  Object.values(db.sessions).forEach(s=>{
+    const pid=projectId(s), date=s.date; if(!date)return;
+    if(!proj[pid]) proj[pid]={ name:s.creator||pid, hoursInRange:0, gmvInRange:0 };
+    const inRangeDate=date>=start&&date<=end;
+    if(inRangeDate){ const rawH=(s.dur||0)/3600, waived=s.hoursWaived||0; proj[pid].hoursInRange+=Math.max(0,rawH-waived); proj[pid].gmvInRange+=s['Attributed GMV']||0; }
+    const hosts=s.hosts||[]; if(!hosts.length)return;
+    const per=payPeriodForDateJS(date), key=per.start+'|'+per.end;
+    periodMap[key]=periodMap[key]||{};
+    hosts.forEach(h=>{ const name=(h.name||'').trim().toUpperCase(); if(!name)return;
+      const hrs=hostSegmentHoursJS(h);
+      periodMap[key][name]=periodMap[key][name]||{totalHours:0,byProjectInRange:{}};
+      periodMap[key][name].totalHours+=hrs;
+      if(inRangeDate) periodMap[key][name].byProjectInRange[pid]=(periodMap[key][name].byProjectInRange[pid]||0)+hrs;
+    });
+  });
+  const costByProject={};
+  Object.values(periodMap).forEach(hosts=>{ Object.values(hosts).forEach(h=>{ const rate=hostRateJS(h.totalHours);
+    Object.entries(h.byProjectInRange).forEach(([pid,hrs])=>{ costByProject[pid]=(costByProject[pid]||0)+hrs*rate; }); }); });
+  const projects=Object.entries(proj).map(([pid,p])=>{
+    const pricing=(pricingAll[pid]||{}).pricing||null;
+    const revenue=evalFlatFee(pricing&&pricing.fee,p.hoursInRange)+evalCommission(pricing&&pricing.commission,p.gmvInRange);
+    const cost=Math.round((costByProject[pid]||0)*100)/100, margin=Math.round((revenue-cost)*100)/100;
+    const hasPricing=!!(pricing&&((pricing.fee&&(pricing.fee.mode==='tiered'?(pricing.fee.tiers||[]).length:pricing.fee.perHour))||(pricing.commission&&(pricing.commission.mode==='tiered'?(pricing.commission.tiers||[]).length:pricing.commission.pct))));
+    return { projectId:pid, name:p.name, hours:Math.round(p.hoursInRange*100)/100, gmv:Math.round(p.gmvInRange*100)/100,
+      revenue:Math.round(revenue*100)/100, cost, margin, costRatio: revenue>0?Math.round((cost/revenue)*10000)/100:(cost>0?null:0), hasPricing };
+  }).sort((a,b)=>(b.costRatio??999)-(a.costRatio??999));
+  return { start, end, projects };
+}
+function healthBadge(p){
+  if(!p.hasPricing) return '<span class="health-badge na">NO PRICING</span>';
+  if(p.costRatio==null) return '<span class="health-badge risk">COST, NO REVENUE</span>';
+  if(p.costRatio<40) return '<span class="health-badge good">HEALTHY</span>';
+  if(p.costRatio<65) return '<span class="health-badge watch">WATCH</span>';
+  return '<span class="health-badge risk">AT RISK</span>';
+}
+async function renderProjectHealth(){
+  const sec=document.getElementById('projHealthSec');
+  const isAdmin = !ONLINE() || (SESSION&&SESSION.role==='admin');
+  if(!isAdmin){ sec.style.display='none'; return; }
+  sec.style.display='block';
+  const box=document.getElementById('projHealthBox');
+  const today=new Date().toISOString().slice(0,10), start=today.slice(0,7)+'-01';
+  let data;
+  try{ data = ONLINE() ? await api('/project-health?start='+start+'&end='+today) : computeProjectHealthLocal(start,today); }
+  catch(e){ box.innerHTML='<div class="emptyc">Failed to load project health: '+e.message+'</div>'; return; }
+  const rows=data.projects;
+  if(!rows.length){ box.innerHTML='<div class="emptyc">No project data yet.</div>'; return; }
+  box.innerHTML=`<div class="mini" style="margin-bottom:10px">Period ${data.start} → ${data.end} · thresholds: Cost/Revenue &lt;40% Healthy · 40–65% Watch · &gt;65% At Risk (or costs with no pricing set) — adjustable, just a starting default.</div>`+
+    `<div class="scroll"><table><thead><tr><th style="text-align:left">Project</th><th>Hours</th><th>GMV</th><th>Revenue</th><th>Cost</th><th>Margin</th><th>Cost/Revenue</th><th>Health</th></tr></thead><tbody>`+
+    rows.map(p=>`<tr><td style="text-align:left">${p.name}</td><td>${p.hours.toFixed(1)}h</td><td>$${Math.round(p.gmv).toLocaleString()}</td>`+
+      `<td>$${Math.round(p.revenue).toLocaleString()}</td><td>$${Math.round(p.cost).toLocaleString()}</td>`+
+      `<td class="${p.margin<0?'tdown':'tup'}">$${Math.round(p.margin).toLocaleString()}</td>`+
+      `<td>${p.costRatio==null?'—':p.costRatio.toFixed(0)+'%'}</td><td style="text-align:left">${healthBadge(p)}</td></tr>`).join('')+
+    `</tbody></table></div>`;
 }
 async function renderPL(pid,sessions,R,A){
   const box=document.getElementById('plBox');
@@ -1153,7 +1223,7 @@ async function render(){
   Chart.defaults.color='#8b9682'; Chart.defaults.font.family="'Space Grotesk',sans-serif";
   document.getElementById('rangeLabel').textContent=`This ${R.start} → ${R.end} (${R.len}d) · Prior ${R.pStart} → ${R.pEnd}`;
   const A=agg(inRange(sessions,R.start,R.end)), P=agg(inRange(sessions,R.pStart,R.pEnd));
-  renderFunnel(A,P); renderOverview(sessions,R,A);
+  renderFunnel(A,P); await renderOverview(sessions,R,A);
   renderProducts(sessions,R); renderSourceFollow(sessions,R); renderDaily(sessions,R); renderGoals(sessions,R.today);
   await renderPL(pid,sessions,R,A);
   const shortDays=[...new Set(sessions.filter(s=>s.dur<3600).map(s=>s.date))];
@@ -1165,7 +1235,8 @@ async function render(){
     `<br><span style="color:var(--risk)">Note: Ad Spend for historical days is a placeholder sample (to demo ROI); real values come from data entry once the backend is connected.</span>`;
 }
 
-function renderOverview(sessions,R,A){
+async function renderOverview(sessions,R,A){
+  const pid=document.getElementById('proj').value;
   const todayA=agg(inRange(sessions,R.today,R.today));
   const mStart=monthStart(R.today), mtdSessions=inRange(sessions,mStart,R.today), mtdA=agg(mtdSessions);
   const g=(loadGoals()[document.getElementById('proj').value])||{};
@@ -1173,10 +1244,20 @@ function renderOverview(sessions,R,A){
   const latestPoc=[...sessions].filter(s=>s.poc).sort((a,b)=>a.date.localeCompare(b.date)).pop();
   const campDays=[...new Set(mtdSessions.filter(s=>s.campaign).map(s=>s.date))].length;
   const campNames=[...new Set(mtdSessions.filter(s=>s.campaign).map(s=>s.campaign))];
+  // MTD Revenue (from Project Settings pricing) and MTD Host+Mod Cost — same math as Section 07, MTD basis
+  await ensurePricingLoaded(pid);
+  const mtdFlatFee=evalFlatFee(PRICING.fee,mtdA.hours), mtdCommission=evalCommission(PRICING.commission,mtdA.gmv);
+  const mtdRevenue=mtdFlatFee+mtdCommission;
+  let mtdCost=null,mtdCostErr=false;
+  try{ if(ONLINE()){ const r=await api('/project/cost?project='+encodeURIComponent(pid)+'&start='+mStart+'&end='+R.today); mtdCost=r.cost; }
+    else{ const r=computeProjectCostLocal(pid,mStart,R.today); mtdCost=r.cost; } }
+  catch(e){ mtdCost=null; mtdCostErr=true; }
   const cards=[
     ['Today GMV',F.money(todayA.gmv),R.today,'hi'],
     ['MTD GMV',F.money(mtdA.gmv),mStart+' → '+R.today,'hi'],
     ['MTD GMV Completion',gmvComp==null?'—':gmvComp.toFixed(0)+'%',g.gmv?('goal $'+(+g.gmv).toLocaleString()):'no goal set','hi'],
+    ['MTD Revenue',F.money(mtdRevenue),'fee $'+Math.round(mtdFlatFee).toLocaleString()+' + commission $'+Math.round(mtdCommission).toLocaleString(),'hi'],
+    ['MTD Host+Mod Cost',mtdCost==null?'—':F.money(mtdCost),mtdCost==null?(mtdCostErr?'no permission or no data':'no data'):'biweekly-rate slices, this project',''],
     ['MTD Hours',fmtDur(mtdA.hours*3600),mtdA.dcount+' days'+(mtdA.hoursWaived>0?` · ${mtdA.hoursWaived.toFixed(1)}h waived`:''),''],
     ['MTD Hours Completion',hrComp==null?'—':hrComp.toFixed(0)+'%',g.hours?('goal '+g.hours+'h'):'no goal set','hi'],
     ['Total Ad Spend',A.hasAd?F.money(A.adSpend):'—','selected period',''],
@@ -1758,6 +1839,7 @@ async function renderMgmt(){
   document.getElementById('mTable').innerHTML=html+'</tbody>';
   document.getElementById('mFoot').innerHTML='Avg Hourly Impression = Σimp ÷ Σhours · Enter Room Rate = Σviews ÷ Σimp · Live CTR = Σclicks ÷ Σviews · CTOR = Σorders ÷ Σclicks · AOV = ΣGMV ÷ Σorders · Hourly GMV = ΣGMV ÷ Σhours · ROI = ΣGMV ÷ Σad spend. Completion = MTD ÷ goal · Growth = (MTD − prior same period) ÷ prior. Visible to all logged-in users.';
   await renderHostPay();
+  await renderProjectHealth();
 }
 
 /* ---- M4: Host Pay — auto-computed from Hosts & time entered at daily upload, biweekly Friday payday ----
