@@ -647,6 +647,25 @@ export default {
         return json({ projects: list.map(({ tableId, ...p }) => p) }, 200, origin);
       }
 
+      /* ----- register a brand-new project up front, before it has ever gone live -----
+         Previously a project only came into existence (a _Registry row + its own data table)
+         as a side effect of /ingest'ing its first session — which meant Goals and Project
+         Settings pricing couldn't be set until AFTER the first live was uploaded. This lets an
+         admin create the project (and its empty table, via the same ensureProjectTable used by
+         /ingest) ahead of time, so it shows up in /projects and Goals/pricing can be configured
+         before day one. Admin-only: creating a new client project also implies deciding who
+         should get view/upload access to it, which is an admin action either way. */
+      if (path === '/projects' && request.method === 'POST') {
+        if (me.role !== 'admin') return json({ error: 'admin only' }, 403, origin);
+        const { projectId, name } = await request.json();
+        const pid = String(projectId || '').trim();
+        if (!pid) return json({ error: 'missing projectId' }, 400, origin);
+        const existing = await findByField(env, env.REGISTRY_TABLE_ID, 'projectId', pid);
+        if (existing) return json({ error: 'a project with this id already exists' }, 409, origin);
+        await ensureProjectTable(env, pid, String(name || '').trim() || pid);
+        return json({ ok: true, projectId: pid, name: String(name || '').trim() || pid }, 200, origin);
+      }
+
       /* ----- records for a project ----- */
       if (path === '/records' && request.method === 'GET') {
         const projectId = url.searchParams.get('project');
