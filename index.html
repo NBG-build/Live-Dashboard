@@ -247,9 +247,6 @@ body.online .offline-only{display:none!important}
 .hostrow{display:flex;flex-direction:column;gap:5px;margin-top:9px;padding-top:9px;border-top:1px dashed var(--line)}
 .hostrow:first-child{border-top:none;padding-top:0;margin-top:5px}
 .hostrow .hname{width:100%;text-transform:uppercase;font-size:14px;letter-spacing:.5px;padding:8px 10px}
-.hostrow .hsel{width:100%;font-size:14px;padding:8px 10px;background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:7px;font-family:inherit}
-.hostrow .hsel:focus{border-color:var(--neon);outline:none}
-.hostrow .hnew{margin-top:5px}
 .hostrow .htimes{display:flex;gap:8px;align-items:center}
 .hostrow .htime{width:120px}
 .hostrow .hx{color:var(--faint);cursor:pointer;font-size:13px;margin-left:auto}
@@ -308,7 +305,7 @@ body.previewing #gate{display:none!important}
         <div id="feeTiered" style="margin-top:12px;display:none">
           <div id="feeTierRows"></div>
           <button class="btn sm ghost" id="addFeeTier" style="margin-top:6px">+ Add tier</button>
-          <div class="mini" style="margin-top:6px">Each tier = monthly hours band → $/hour rate for that band (rate × hours in the selected period). Leave "to" blank for "and above".</div>
+          <div class="mini" style="margin-top:6px">Each tier = monthly hours band → flat fee $ for that band. Leave "to" blank for "and above".</div>
         </div>
       </div>
       <div>
@@ -550,7 +547,7 @@ function saveGoals(g){ localStorage.setItem(GOAL_KEY,JSON.stringify(g)); }
    Fill WORKER_URL after deploying the Worker. Blank = local prototype mode
    (seed + localStorage, current behaviour). */
 const CONFIG = {
-  WORKER_URL: 'https://live-dashboard.am-043.workers.dev',   // no trailing slash
+  WORKER_URL: 'https://live-dashboard.yw924.workers.dev',   // no trailing slash
   LARK_APP_ID: 'cli_aacc98f79a385ee6',
 };
 const ONLINE = () => !!CONFIG.WORKER_URL && !PREVIEW;   // preview mode forces fully-local mode
@@ -587,27 +584,6 @@ async function loadTeamNames(){
   if(!ONLINE()){ TEAM_NAMES=[]; return TEAM_NAMES; }
   try{ TEAM_NAMES=(await api('/team')).names||[]; }catch(e){ TEAM_NAMES=[]; }
   return TEAM_NAMES;
-}
-/* ---- host roster for the Hosts&time picker: pick an existing host, or type+save a new one ----
-   Falls back to free text (old behaviour) if the roster can't load. New names typed in are
-   POSTed to /hosts so the very next session (this one included) shows them in the dropdown. */
-let HOST_NAMES=null; // null = not loaded yet, [] = loaded but empty/failed
-async function loadHostNames(){
-  if(HOST_NAMES!==null) return HOST_NAMES;
-  if(!ONLINE()){ HOST_NAMES=[]; return HOST_NAMES; }
-  try{ HOST_NAMES=(await api('/hosts')).names||[]; }catch(e){ HOST_NAMES=[]; }
-  return HOST_NAMES;
-}
-async function addHostName(rawName){
-  const name=(rawName||'').trim().toUpperCase();
-  if(!name) return name;
-  HOST_NAMES=HOST_NAMES||[];
-  if(HOST_NAMES.includes(name)) return name;
-  if(ONLINE()){
-    try{ const r=await api('/hosts',{method:'POST',body:JSON.stringify({name})}); HOST_NAMES=r.names||HOST_NAMES; }
-    catch(e){ if(!HOST_NAMES.includes(name)) HOST_NAMES.push(name); } // save failed — still let them use it locally
-  } else if(!HOST_NAMES.includes(name)) HOST_NAMES.push(name);
-  return name;
 }
 /* ---- Lark login gate ---- */
 function showGate(msg){ const g=document.getElementById('gate'); if(g){ g.style.display='flex'; document.getElementById('gateMsg').innerHTML=msg; } }
@@ -742,12 +718,10 @@ let _pricingLoadedForPid=null;
 async function ensurePricingLoaded(pid){ if(_pricingLoadedForPid===pid) return; await loadProjSettings(pid); _pricingLoadedForPid=pid; }
 /* ---- pricing evaluation (Section 07 P&L) ----
    Tiers are applied as a single band (like the Host Pay tiers above), not marginal: whichever
-   band the hours/GMV falls into, that band's rate applies to the whole amount — for the flat
-   fee, t.fee is a $/hour rate for that band (so hours * t.fee), not a flat lump sum; for
-   commission, t.pct is a % applied to the whole GMV. */
+   band the hours/GMV falls into, that band's fee/% applies to the whole amount. */
 function evalFlatFee(fee,hours){
   if(!fee) return 0;
-  if(fee.mode==='tiered'){ const t=(fee.tiers||[]).find(t=>hours>=Number(t.from||0)&&(t.to==null||t.to===''||hours<Number(t.to))); return t?hours*(Number(t.fee)||0):0; }
+  if(fee.mode==='tiered'){ const t=(fee.tiers||[]).find(t=>hours>=Number(t.from||0)&&(t.to==null||t.to===''||hours<Number(t.to))); return t?(Number(t.fee)||0):0; }
   return (Number(fee.perHour)||0)*hours;
 }
 function evalCommission(comm,gmv){
@@ -851,7 +825,7 @@ async function renderPL(pid,sessions,R,A){
   const margin=cost!=null?revenue-cost:null, marginPct=(cost!=null&&revenue>0)?(margin/revenue*100):null;
   const latestPoc=[...sessions].filter(s=>s.poc).sort((a,b)=>a.date.localeCompare(b.date)).pop();
   const campDaysR=[...new Set(inRange(sessions,R.start,R.end).filter(s=>s.campaign).map(s=>s.date))].length;
-  const feeDesc=!PRICING.fee?'not set':(PRICING.fee.mode==='tiered'?(feeTier?`tiered · ${hours.toFixed(1)}h → band [${feeTier.from}–${feeTier.to==null||feeTier.to===''?'∞':feeTier.to}h] @ $${(+feeTier.fee||0).toLocaleString()}/h × ${hours.toFixed(1)}h`:'tiered · no band matches '+hours.toFixed(1)+'h'):`simple · $${(+PRICING.fee.perHour||0)}/h × ${hours.toFixed(1)}h`);
+  const feeDesc=!PRICING.fee?'not set':(PRICING.fee.mode==='tiered'?(feeTier?`tiered · ${hours.toFixed(1)}h → band [${feeTier.from}–${feeTier.to==null||feeTier.to===''?'∞':feeTier.to}h] = $${(+feeTier.fee||0).toLocaleString()}`:'tiered · no band matches '+hours.toFixed(1)+'h'):`simple · $${(+PRICING.fee.perHour||0)}/h × ${hours.toFixed(1)}h`);
   const commDesc=!PRICING.commission?'not set':(PRICING.commission.mode==='tiered'?(commTier?`tiered · $${Math.round(gmv).toLocaleString()} GMV → band [${commTier.from}–${commTier.to==null||commTier.to===''?'∞':commTier.to}] = ${commTier.pct}%`:'tiered · no band matches $'+Math.round(gmv).toLocaleString()):`simple · ${(+PRICING.commission.pct||0)}% × $${Math.round(gmv).toLocaleString()} GMV`);
   box.innerHTML=
     `<div class="cards" style="margin-bottom:10px">
@@ -883,7 +857,7 @@ function renderFeeUI(){
   document.getElementById('feeTiered').style.display=PRICING.fee.mode==='tiered'?'block':'none';
   document.getElementById('feePerHour').value=PRICING.fee.perHour||'';
   const box=document.getElementById('feeTierRows');
-  box.innerHTML=(PRICING.fee.tiers||[]).map((t,i)=>tierRowHtml('ft',t,i,'hrs/mo','Rate ($/h)','fee')).join('');
+  box.innerHTML=(PRICING.fee.tiers||[]).map((t,i)=>tierRowHtml('ft',t,i,'hrs/mo','Flat Fee ($)','fee')).join('');
   box.querySelectorAll('.ft-from').forEach(inp=>inp.oninput=e=>{ PRICING.fee.tiers[+e.target.closest('.trow').dataset.idx].from=num(e.target.value); });
   box.querySelectorAll('.ft-to').forEach(inp=>inp.oninput=e=>{ const v=e.target.value; PRICING.fee.tiers[+e.target.closest('.trow').dataset.idx].to=v===''?null:num(v); });
   box.querySelectorAll('.ft-val').forEach(inp=>inp.oninput=e=>{ PRICING.fee.tiers[+e.target.closest('.trow').dataset.idx].fee=num(e.target.value); });
@@ -1014,8 +988,7 @@ function parseWorkbook(wb){
    Companion export (filename like "lemme_{roomId}_auction.xlsx") with one row per auction
    ROUND, several rounds per product. Aggregates to per-product auction stats: rounds count,
    avg starting bid, avg sale price, bid uplift %, avg bidders, avg round duration (units as
-   given by the source file — not renamed/converted since the export doesn't state them), plus
-   流拍率 (unsold rate): the share of rounds with no Winner, i.e. the round got no successful bid. */
+   given by the source file — not renamed/converted since the export doesn't state them). */
 function parseAuctionWorkbook(wb){
   const shName = wb.SheetNames.find(n=>{ const ws=wb.Sheets[n]; if(!ws)return false;
     const A=XLSX.utils.sheet_to_json(ws,{header:1,defval:null,raw:false}); const hdr=(A[0]||[]).map(h=>String(h||'').trim());
@@ -1036,16 +1009,14 @@ function parseAuctionWorkbook(wb){
   Object.entries(byProduct).forEach(([pid,d])=>{
     const n=d.rounds.length||1;
     const avgStart=mean(d.rounds.map(x=>x.startBid)), avgSale=mean(d.rounds.map(x=>x.salePrice));
-    const unsoldRounds=d.rounds.filter(x=>!x.winner).length; // no Winner recorded for this round = 流拍 (round went unsold)
     out[pid]={ name:d.name, gmv:d.gmv, itemsSold:d.itemsSold, stock:d.stock, rounds:d.rounds.length,
       avgStartBid:Math.round(avgStart*100)/100, avgSalePrice:Math.round(avgSale*100)/100,
       upliftPct: avgStart? Math.round(((avgSale-avgStart)/avgStart)*10000)/10000 : 0,
       avgBidders: Math.round(mean(d.rounds.map(x=>x.bidders))*100)/100,
       avgDuration: Math.round(mean(d.rounds.map(x=>x.duration))*100)/100,
-      winners: [...new Set(d.rounds.map(x=>x.winner).filter(Boolean))].length,
-      unsoldRounds, unsoldRate: d.rounds.length? Math.round((unsoldRounds/d.rounds.length)*10000)/10000 : 0 };
+      winners: [...new Set(d.rounds.map(x=>x.winner).filter(Boolean))].length };
   });
-  return out; // { productId: {name,gmv,itemsSold,stock,rounds,avgStartBid,avgSalePrice,upliftPct,avgBidders,avgDuration,winners,unsoldRounds,unsoldRate} }
+  return out; // { productId: {name,gmv,itemsSold,stock,rounds,avgStartBid,avgSalePrice,upliftPct,avgBidders,avgDuration,winners} }
 }
 
 /* ================= pending ================= */
@@ -1090,35 +1061,19 @@ async function stageFiles(files){
   }
   rematchPendingAuctions();
   await loadTeamNames();
-  await loadHostNames();
   renderPending();
 }
 function renderPending(){
   const box=document.getElementById('pending'), bar=document.getElementById('commitBar');
   box.innerHTML=PENDING.map((p,i)=>{
     const tb=p.s.startTime&&p.s.endTime?` min="${p.s.startTime}" max="${p.s.endTime}"`:'';
-    const knownHosts=HOST_NAMES&&HOST_NAMES.length;
-    const hostRows=p.hosts.map((h,hi)=>{
-      const nm=(h.name||'').trim().toUpperCase();
-      const isKnown=knownHosts&&HOST_NAMES.includes(nm);
-      // show the free-text box when: roster unavailable (fallback to old behaviour), user
-      // explicitly picked "+ Add new host…", or this row's name isn't a recognized host yet
-      // (e.g. loaded from a draft, or roster hadn't finished loading when it was typed).
-      const showText=!knownHosts||h._newMode||(nm&&!isKnown);
-      const selectHtml=knownHosts?`<select class="hsel" data-i="${i}" data-hi="${hi}">
-          <option value="">— select host —</option>
-          ${HOST_NAMES.map(n=>`<option value="${escAttr(n)}"${nm===n?' selected':''}>${n}</option>`).join('')}
-          <option value="__new__"${showText?' selected':''}>+ Add new host…</option>
-        </select>`:'';
-      const textHtml=(!knownHosts||showText)?`<input class="hname${knownHosts?' hnew':''}" data-i="${i}" data-hi="${hi}" value="${escAttr(h.name)}" placeholder="${knownHosts?'Type new host name, then click away to save':'HOST NAME'}"/>`:'';
-      return `<div class="hostrow">
-        ${selectHtml}${textHtml}
+    const hostRows=p.hosts.map((h,hi)=>`<div class="hostrow">
+        <input class="hname" data-i="${i}" data-hi="${hi}" value="${h.name}" placeholder="HOST NAME"/>
         <div class="htimes">
           <input type="time" class="htime" data-i="${i}" data-hi="${hi}" data-k="start" value="${h.start}"${tb}/>
           <span class="mini">to</span>
           <input type="time" class="htime" data-i="${i}" data-hi="${hi}" data-k="end" value="${h.end}"${tb}/>
-          ${p.hosts.length>1?`<span class="hx" data-i="${i}" data-hi="${hi}" title="Remove host">✕</span>`:''}</div></div>`;
-    }).join('');
+          ${p.hosts.length>1?`<span class="hx" data-i="${i}" data-hi="${hi}" title="Remove host">✕</span>`:''}</div></div>`).join('');
     const rawH=p.s.dur/3600, waived=num(p.hoursWaived)||0, netH=Math.max(0,rawH-waived);
     const auctN=Object.keys(p.s.auction||{}).length;
     const auctionBlock = auctN
@@ -1162,24 +1117,7 @@ function renderPending(){
     const at=p.pocSel.indexOf(nm); if(at>=0)p.pocSel.splice(at,1); else p.pocSel.push(nm); syncPoc(i); renderPending(); });
   box.querySelectorAll('.poc-other').forEach(inp=>inp.oninput=e=>{ const i=+e.target.dataset.i; PENDING[i].pocOther=e.target.value; syncPoc(i); });
   box.querySelectorAll('.campToggle').forEach(cb=>cb.onchange=e=>{ const i=+e.target.dataset.i; PENDING[i].isCampaign=e.target.checked; if(!e.target.checked)PENDING[i].campaign=''; renderPending(); });
-  box.querySelectorAll('.hsel').forEach(sel=>sel.onchange=e=>{
-    const i=+e.target.dataset.i, hi=+e.target.dataset.hi, v=e.target.value, h=PENDING[i].hosts[hi];
-    if(v==='__new__'){ h._newMode=true; } else { h.name=v; h._newMode=false; }
-    renderPending();
-  });
-  box.querySelectorAll('.hname').forEach(inp=>{
-    inp.oninput=e=>{ e.target.value=e.target.value.toUpperCase(); PENDING[+e.target.dataset.i].hosts[+e.target.dataset.hi].name=e.target.value; };
-    // .hnew = the "type a new host" box shown alongside a roster dropdown (as opposed to the
-    // plain fallback .hname-only input used when the roster failed to load) — saving to the
-    // shared roster only makes sense in that case, and only once they're done typing.
-    if(inp.classList.contains('hnew')) inp.onblur=async e=>{
-      const i=+e.target.dataset.i, hi=+e.target.dataset.hi, typed=e.target.value.trim();
-      if(!typed) return;
-      const saved=await addHostName(typed);
-      const h=PENDING[i]&&PENDING[i].hosts[hi]; if(!h) return;
-      h.name=saved; h._newMode=false; renderPending();
-    };
-  });
+  box.querySelectorAll('.hname').forEach(inp=>inp.oninput=e=>{ e.target.value=e.target.value.toUpperCase(); PENDING[+e.target.dataset.i].hosts[+e.target.dataset.hi].name=e.target.value; });
   box.querySelectorAll('.htime').forEach(inp=>inp.oninput=e=>{ PENDING[+e.target.dataset.i].hosts[+e.target.dataset.hi][e.target.dataset.k]=e.target.value; });
   box.querySelectorAll('.addhost').forEach(b=>b.onclick=e=>{ const i=+e.target.dataset.i; const s=PENDING[i].s; PENDING[i].hosts.push({name:'',start:s.startTime||'',end:s.endTime||''}); renderPending(); });
   box.querySelectorAll('.hx').forEach(x=>x.onclick=e=>{ const i=+e.target.dataset.i;
@@ -1368,31 +1306,28 @@ function top5DayCount(ss){ const dates=[...new Set(ss.map(s=>s.date))]; const cn
     Object.entries(dt).sort((a,b)=>b[1]-a[1]).slice(0,5).forEach(([n])=>cnt[n]=(cnt[n]||0)+1); }); return cnt; }
 /* which product NAMEs (as used in prodTotals) are auction listings, by cross-referencing product IDs
    carried on s.products against the IDs that appear as keys in any session's s.auction —
-   returns { name: {gmv,itemsSold,rounds,avgStartBid,avgSalePrice,upliftPct,avgBidders,avgDuration,unsoldRounds,unsoldRate} } */
+   returns { name: {gmv,itemsSold,rounds,avgStartBid,avgSalePrice,upliftPct,avgBidders,avgDuration} } */
 function auctionStatsByName(ss){
   const nameIds={}; const byId={};
   ss.forEach(s=>{ (s.products||[]).forEach(p=>{ if(p.id){ (nameIds[p.n]=nameIds[p.n]||new Set()).add(p.id); } });
     Object.entries(s.auction||{}).forEach(([pid,a])=>{
-      if(!byId[pid]) byId[pid]={gmv:0,itemsSold:0,rounds:0,startSum:0,saleSum:0,bidSum:0,durSum:0,unsoldRounds:0};
+      if(!byId[pid]) byId[pid]={gmv:0,itemsSold:0,rounds:0,startSum:0,saleSum:0,bidSum:0,durSum:0};
       const t=byId[pid], r=a.rounds||0;
       t.gmv+=a.gmv||0; t.itemsSold+=a.itemsSold||0; t.rounds+=r;
       t.startSum+=(a.avgStartBid||0)*r; t.saleSum+=(a.avgSalePrice||0)*r; t.bidSum+=(a.avgBidders||0)*r; t.durSum+=(a.avgDuration||0)*r;
-      t.unsoldRounds+=a.unsoldRounds||0; // rounds with no Winner (流拍), summed across every session this product auctioned in
     }); });
   const out={};
   Object.entries(nameIds).forEach(([n,ids])=>{
-    const t={gmv:0,itemsSold:0,rounds:0,startSum:0,saleSum:0,bidSum:0,durSum:0,unsoldRounds:0}; let hit=false;
+    const t={gmv:0,itemsSold:0,rounds:0,startSum:0,saleSum:0,bidSum:0,durSum:0}; let hit=false;
     ids.forEach(id=>{ if(byId[id]){ hit=true; Object.keys(t).forEach(k=>t[k]+=byId[id][k]); } });
     if(hit) out[n]={ gmv:t.gmv, itemsSold:t.itemsSold, rounds:t.rounds,
       avgStartBid:t.rounds?t.startSum/t.rounds:0, avgSalePrice:t.rounds?t.saleSum/t.rounds:0,
       upliftPct:t.rounds&&t.startSum?(t.saleSum-t.startSum)/t.startSum:0,
-      avgBidders:t.rounds?t.bidSum/t.rounds:0, avgDuration:t.rounds?t.durSum/t.rounds:0,
-      unsoldRounds:t.unsoldRounds, unsoldRate:t.rounds?t.unsoldRounds/t.rounds:0 };
+      avgBidders:t.rounds?t.bidSum/t.rounds:0, avgDuration:t.rounds?t.durSum/t.rounds:0 };
   });
   return out;
 }
-function auctStatBlurb(a){ if(!a)return ''; const pct=(a.unsoldRate*100), warn=pct>=30;
-  return `<span class="mini auctstat">🔨 ${a.rounds} round${a.rounds===1?'':'s'} · avg bid $${a.avgStartBid.toFixed(0)}→$${a.avgSalePrice.toFixed(0)} (${a.upliftPct>=0?'+':''}${(a.upliftPct*100).toFixed(0)}%) · ~${a.avgBidders.toFixed(1)} bidders/round · <span class="${warn?'warnc':''}">流拍率 ${pct.toFixed(0)}%</span> (${a.unsoldRounds}/${a.rounds} rounds no winner)</span>`; }
+function auctStatBlurb(a){ if(!a)return ''; return `<span class="mini auctstat">🔨 ${a.rounds} round${a.rounds===1?'':'s'} · avg bid $${a.avgStartBid.toFixed(0)}→$${a.avgSalePrice.toFixed(0)} (${a.upliftPct>=0?'+':''}${(a.upliftPct*100).toFixed(0)}%) · ~${a.avgBidders.toFixed(1)} bidders/round</span>`; }
 function renderProducts(sessions,R){
   const inR=inRange(sessions,R.start,R.end), inP=inRange(sessions,R.pStart,R.pEnd);
   const dates=[...new Set(inR.map(s=>s.date))].sort();
@@ -1438,7 +1373,7 @@ function renderProducts(sessions,R){
     `<div class="clsgrp clshero"><h4>★ Hero Products <span class="mini" style="text-transform:none;letter-spacing:0">in Top 5 &gt; half the days in BOTH periods · tagged HOT (+15%) / DECREASING (−15%)</span></h4>${heroRows}</div>`+
     `<div class="clsgrp clspot"><h4>▲ High-Potential Products <span class="mini" style="text-transform:none;letter-spacing:0">newly qualifying in Top 5 this period</span></h4>${potRows}</div>`+
     `<div class="clsgrp clsdec"><h4>▼ Declining Products <span class="mini" style="text-transform:none;letter-spacing:0">dropped out of Top 5 this period</span></h4>${decRows}</div>`+
-    (auctList.length?`<div class="clsgrp clsauct"><h4>🔨 Auction Products <span class="mini" style="text-transform:none;letter-spacing:0">ranked by GMV this period · from the auction-detail file(s) you uploaded · includes 流拍率 (rounds with no winner)</span></h4>${auctRows}</div>`:'');
+    (auctList.length?`<div class="clsgrp clsauct"><h4>🔨 Auction Products <span class="mini" style="text-transform:none;letter-spacing:0">ranked by GMV this period · from the auction-detail file(s) you uploaded</span></h4>${auctRows}</div>`:'');
 }
 
 function renderSourceFollow(sessions,R){
