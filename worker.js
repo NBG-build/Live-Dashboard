@@ -195,6 +195,48 @@ async function ensureRegistryFields(env) {
   await ensureFieldsList(env, env.REGISTRY_TABLE_ID, REGISTRY_FIELDS);
   _registryEnsured = true;
 }
+
+/* ---------------- host roster table (self-provisioning, no env var needed) ----------------
+   One shared table listing every known host name, so the upload UI can offer "pick an
+   existing host" instead of free-typing a name every time (which is how names like
+   "ALEXANDRIA"/"ALEXANDRIA RODRIGUEZ"/"ALEXIANDRIA" ended up meaning the same person in
+   three different ways — see canonicalHostName's HOST_ROSTER alias table above, which still
+   applies as a safety net for legacy rows). Table is called "_Hosts", one column: name.
+   Resolved once per Worker instance (same caching pattern as _registryEnsured above); if
+   env.HOSTS_TABLE_ID is set, that's used directly instead of the find-by-name lookup. */
+const HOST_FIELDS = [['name', TXT], ['addedBy', TXT], ['addedAt', TXT]];
+let _hostsTableId = null;
+async function ensureHostsTable(env) {
+  if (_hostsTableId) return _hostsTableId;
+  if (env.HOSTS_TABLE_ID) {
+    await ensureFieldsList(env, env.HOSTS_TABLE_ID, HOST_FIELDS);
+    _hostsTableId = env.HOSTS_TABLE_ID;
+    return _hostsTableId;
+  }
+  const tableName = '_Hosts';
+  let tableId = null;
+  try {
+    let pageToken = '';
+    do {
+      const qs = `page_size=100${pageToken ? '&page_token=' + encodeURIComponent(pageToken) : ''}`;
+      const d = await bt(env, `/tables?${qs}`, { method: 'GET' });
+      const hit = (d.items || []).find(t => t.name === tableName);
+      if (hit) { tableId = hit.table_id; break; }
+      pageToken = d.has_more ? d.page_token : '';
+    } while (pageToken);
+  } catch (e) { /* fall through to create */ }
+  if (tableId) {
+    await ensureFieldsList(env, tableId, HOST_FIELDS);
+  } else {
+    const d = await bt(env, `/tables`, {
+      method: 'POST',
+      body: JSON.stringify({ table: { name: tableName, fields: HOST_FIELDS.map(([field_name, type]) => ({ field_name, type })) } }),
+    });
+    tableId = d.table_id;
+  }
+  _hostsTableId = tableId;
+  return tableId;
+}
 /* Add any columns the table is missing (handles tables created with an older schema) */
 async function ensureFields(env, tableId) {
   await ensureFieldsList(env, tableId, SESSION_FIELDS);
@@ -286,13 +328,63 @@ function hostSegmentHours(h) {
   if (mins <= 0) mins += 24 * 60; // overnight session
   return mins / 60;
 }
+
+/* ---------------- host roster (alias -> canonical name) ----------------
+   Hosts get typed inconsistently across sessions (typos, full name vs first
+   name, nickname vs legal name). Since hostRate() buckets pay by a host's
+   TOTAL cross-project hours, an unmerged alias silently splits one person's
+   hours across two "people" and can push both fragments into a lower pay
+   tier than the real person actually earned — this table exists to prevent
+   that. Keys and values are compared upper-cased/trimmed (see
+   canonicalHostName below). The value is whichever spelling should show up
+   in reports; add new aliases here as they're spotted instead of guessing
+   at match time.
+   NOTE: a handful of records store MULTIPLE people in one name field, e.g.
+   "DEELILAH, ISO, ANN, MARIA, JOSELYN" — those can't be fixed by aliasing
+   (there's no way to know how to split that shift's hours between them) and
+   are intentionally left untouched here; they need to be corrected at the
+   data-entry source (split into separate {name,start,end} host entries).
+   A few short forms below are ambiguous and deliberately NOT auto-merged —
+   see the list under the table — because merging the wrong two people is
+   worse for payroll than leaving them as separate (over-)counted names. */
+const HOST_ROSTER = {
+  // --- typos ---
+  'ALEXIANDRIA': 'ALEXANDRIA',
+  'ALEXANDRIA ROGRIGUEZ': 'ALEXANDRIA',
+  'BRAIN': 'BRIAN',
+  'COSETEE': 'COSETTE EDMONDS',
+  'DEEL': 'DEELILAH',
+  'G ABBA': 'GABBA',
+  'JESALYN': 'JOSELYN',
+  'ANN MICHELE': 'ANN MICHELLE',
+  // --- full name -> canonical short form used most often in reports ---
+  'ALEXANDRIA RODRIGUEZ': 'ALEXANDRIA',
+  'ADRIAN BROWN': 'ADRIAN',
+  'BRIAN KRUSE': 'BRIAN',
+  'COSETTE': 'COSETTE EDMONDS',
+  'DEELILAH CONTRERAS': 'DEELILAH',
+  'ELEANE PUELL': 'ELEANE',
+  'JOSELYN GOMEZ': 'JOSELYN',
+  'MARIA PAULA': 'MARIA',
+  'STELLA STEWART': 'STELLA',
+  'TRANG VO': 'TRANG',
+};
+/* Known-ambiguous short forms seen in the data — NOT merged automatically.
+   Confirm who each one really is, then either add to HOST_ROSTER above or
+   leave separate: 'ANN' (-> Ann Michelle?), 'DEE' (-> Deelilah?),
+   'ALEX' (-> Alexandria?), 'JORDAN' / 'ISO' (-> Isobel Jordan?). */
+function canonicalHostName(raw) {
+  const name = String(raw || '').trim().toUpperCase();
+  if (!name) return '';
+  return HOST_ROSTER[name] || name;
+}
 /* pricing evaluation — mirrors evalFlatFee/evalCommission in dashboard.html so /project-health
    agrees with what Section 07 shows for a single project. Tiers are whole-band, not marginal. */
 function evalFlatFeeServer(fee, hours) {
   if (!fee) return 0;
   if (fee.mode === 'tiered') {
     const t = (fee.tiers || []).find(t => hours >= Number(t.from || 0) && (t.to == null || t.to === '' || hours < Number(t.to)));
-    return t ? (Number(t.fee) || 0) : 0;
+    return t ? hours * (Number(t.fee) || 0) : 0; // t.fee is the $/h rate for this band, not a flat lump sum
   }
   return (Number(fee.perHour) || 0) * hours;
 }
@@ -522,6 +614,31 @@ export default {
         return json({ names }, 200, origin);
       }
 
+      /* ----- host roster: known live-hosts, so the upload UI can offer a picker instead of
+         free-typing a name every time. GET lists everyone; POST adds one (idempotent — if the
+         (canonicalized) name already exists, it's just returned, nothing is duplicated). Any
+         active user can add a host here (whoever's uploading sessions is the one who'd notice
+         a new host isn't in the list yet), not admin-only like /hostpay or /project-health. */
+      if (path === '/hosts' && request.method === 'GET') {
+        const tid = await ensureHostsTable(env);
+        const rows = await listAll(env, tid);
+        const names = [...new Set(rows.map(r => canonicalHostName(textVal(r.fields.name))).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+        return json({ names }, 200, origin);
+      }
+      if (path === '/hosts' && request.method === 'POST') {
+        const { name } = await request.json();
+        const canon = canonicalHostName(name);
+        if (!canon) return json({ error: 'missing name' }, 400, origin);
+        const tid = await ensureHostsTable(env);
+        const existing = await findByField(env, tid, 'name', canon);
+        if (!existing) {
+          await createRecord(env, tid, { name: canon, addedBy: me.email || me.name || '', addedAt: new Date().toISOString() });
+        }
+        const rows = await listAll(env, tid);
+        const names = [...new Set(rows.map(r => canonicalHostName(textVal(r.fields.name))).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+        return json({ names }, 200, origin);
+      }
+
       /* ----- projects visible to me ----- */
       if (path === '/projects' && request.method === 'GET') {
         const regs = await listAll(env, env.REGISTRY_TABLE_ID);
@@ -665,7 +782,7 @@ export default {
             const per = payPeriodForDate(date), key = per.start + '|' + per.end;
             if (!periodMap[key]) periodMap[key] = {};
             hosts.forEach(h => {
-              const name = String(h.name || '').trim().toUpperCase();
+              const name = canonicalHostName(h.name);
               if (!name) return;
               const hrs = hostSegmentHours(h);
               if (!periodMap[key][name]) periodMap[key][name] = { totalHours: 0, inRangeThisProject: 0 };
@@ -704,7 +821,7 @@ export default {
             const key = per.start + '|' + per.end;
             if (!periodMap[key]) periodMap[key] = { start: per.start, end: per.end, payDate: per.payDate, hosts: {} };
             hosts.forEach(h => {
-              const name = String(h.name || '').trim().toUpperCase();
+              const name = canonicalHostName(h.name);
               if (!name) return;
               const hrs = hostSegmentHours(h);
               if (!periodMap[key].hosts[name]) periodMap[key].hosts[name] = { hours: 0, byProject: {} };
@@ -760,7 +877,7 @@ export default {
             const per = payPeriodForDate(date), key = per.start + '|' + per.end;
             if (!periodMap[key]) periodMap[key] = {};
             hosts.forEach(h => {
-              const hname = String(h.name || '').trim().toUpperCase();
+              const hname = canonicalHostName(h.name);
               if (!hname) return;
               const hrs = hostSegmentHours(h);
               if (!periodMap[key][hname]) periodMap[key][hname] = { totalHours: 0, byProjectInRange: {} };
