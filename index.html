@@ -523,7 +523,12 @@ body.previewing #gate{display:none!important}
 <div class="toast" id="toast"></div>
 <div id="reportModal" class="modal"><div class="modalbox wide">
   <div class="mh"><b id="repTitle"></b><span class="x" id="repClose">✕</span></div>
-  <div class="mini">Required metrics are auto-filled. Tick optional ones to include. Insights are typed manually and saved to the database.</div>
+  <div class="mini">Required metrics are auto-filled. Tick optional ones to include. AI drafts are editable. Check the facts, preview, then confirm review before sending.</div>
+  <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap">
+    <button class="btn sm" id="repAI" onclick="generateAIReport()">✨ Generate AI draft</button>
+    <button class="btn sm ghost" id="repLoadAI" onclick="loadSavedAIDraft()">Load saved AI draft</button>
+    <span class="mini" id="repAIStatus" role="status" aria-live="polite"></span>
+  </div>
   <div id="reportBody" style="max-height:60vh;overflow:auto;margin-top:10px"></div>
   <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
     <button class="btn sm ghost" id="repCancel">Close</button>
@@ -1509,7 +1514,7 @@ function daySources(inR,d){ return ALL_SRC.map(k=>{ const vals=inRange(inR,d,d).
 async function renderDaily(sessions,R){
   const pid=document.getElementById('proj').value;
   REPORTS=await getReports(pid, '');
-  const inR=inRange(sessions,R.start,R.end).filter(s=>s.dur>=3600);
+  const inR=inRange(sessions,R.start,R.end);
   const dates=[...new Set(inR.map(s=>s.date))].sort();
   const gCount={}; GRP_ORDER.forEach(([g])=>gCount[g]=DCOLS.filter(c=>c.grp===g).length);
   let head='<thead><tr>'+
@@ -1517,13 +1522,13 @@ async function renderDaily(sessions,R){
     GRP_ORDER.map(([g,col])=>`<th colspan="${gCount[g]}" style="text-align:center;color:${col}">${g}</th>`).join('')+'</tr>'+
     '<tr>'+GRP_ORDER.flatMap(([g])=>DCOLS.filter(c=>c.grp===g)).map(c=>`<th>${c.lab}</th>`).join('')+'</tr></thead>';
   const orderedCols=[...DCOLS.filter(c=>!c.grp),...GRP_ORDER.flatMap(([g])=>DCOLS.filter(c=>c.grp===g))];
-  const rd=dates.map(d=>({d,a:agg(inRange(inR,d,d))}));
+  const rd=dates.map(d=>({d,a:reportAgg(inRange(inR,d,d))}));
   const colspan=orderedCols.length+1;
   let body='<tbody>';
   rd.forEach((r,i)=>{ const prev=i>0?rd[i-1].a:null, a=r.a; const hasRep=REPORTS[r.d];
     const nSess=inRange(inR,r.d,r.d).length;
     const sessToggle=nSess>1?`<span class="sesstog" data-date="${r.d}" title="Show each session">${nSess} ⧉</span>`:nSess;
-    body+=`<tr data-date="${r.d}"><td><button class="repbtn ${hasRep?'on':''}" data-date="${r.d}" title="Fill in / read the daily report">📄</button> ${r.d}</td>`+orderedCols.map(col=>{
+    body+=`<tr data-date="${r.d}"><td><button class="repbtn ${hasRep?'on':''}" data-date="${r.d}" title="Fill in / read the daily report">${hasRep&&hasRep.aiDraft&&!Object.values(hasRep.insights||{}).some(Boolean)?'✨':'📄'}</button> ${r.d}</td>`+orderedCols.map(col=>{
       if(col.k==='n') return `<td>${sessToggle}</td>`;
       const val=col.get(a); let badge='';
       if(prev&&val!=null){ const pv=col.get(prev);
@@ -1533,7 +1538,7 @@ async function renderDaily(sessions,R){
     }).join('')+'</tr>';
     // per-session sub-rows (hidden)
     const sess=inRange(inR,r.d,r.d).sort((x,y)=>(x.startTime||'').localeCompare(y.startTime||''));
-    if(sess.length>1){ sess.forEach((ss,si)=>{ const sa=agg([ss]);
+    if(sess.length>1){ sess.forEach((ss,si)=>{ const sa=reportAgg([ss]);
       body+=`<tr class="sessrow" data-date="${r.d}" style="display:none"><td style="padding-left:22px;color:var(--muted)">↳ Session ${si+1}${ss.startTime?` ${ss.startTime}–${ss.endTime}`:''}</td>`+
         orderedCols.map(col=> col.k==='n'?'<td></td>':`<td>${col.disp(sa)}</td>`).join('')+'</tr>'; }); }
     // impression detail row: viewer source, day-over-day
@@ -1570,6 +1575,47 @@ async function renderGoals(sessions,today){
   else{ document.getElementById('hrBar').style.width='0%'; document.getElementById('hrProg').textContent='No goal set'; }
 }
 
+
+function reportAgg(ss){
+  const a=agg(ss); a.hours=a.rawHours;
+  a.hourlyGmv=a.hours?a.gmv/a.hours:0; a.impPerHour=a.hours?a.imp/a.hours:0;
+  return a;
+}
+async function reportFingerprint(ss,date){
+  const rows=ss.filter(s=>s.date<=date).map(s=>({
+    room:s.room,date:s.date,dur:s.dur,gmv:s['Attributed GMV'],orders:s.orders,
+    views:s['Views'],imp:s['LIVE impression'],clicks:s['Product Clicks'],
+    adSpend:s.adSpend,avgViewDur:s.avgViewDur,likes:s['Likes'],followers:s['New followers'],
+    comments:s['Comments'],shares:s['Shares'],products:s.products,source:s.source,hosts:s.hosts
+  })).sort((a,b)=>(a.date+'|'+a.room).localeCompare(b.date+'|'+b.room));
+  const buf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(rows)));
+  return Array.from(new Uint8Array(buf),b=>b.toString(16).padStart(2,'0')).join('');
+}
+
+function applyAIDraft(draft,confirmReplace=true){
+  if(!REPORT_CTX||!draft)return;
+  if(draft.fingerprint!==REPORT_CTX.fingerprint){
+    document.getElementById('repAIStatus').textContent='Data changed. Refresh the dashboard, reopen this report, then generate a fresh draft.';return;
+  }
+  if(confirmReplace&&Object.values(collectReport().insights).some(Boolean)&&!confirm('Replace the text in this editor with the AI draft? Your saved report stays unchanged until you save.'))return;
+  document.querySelectorAll('#reportBody .rins').forEach(el=>{el.value=draft.insights?.[el.dataset.sec]||'';});
+  document.getElementById('repAIStatus').textContent='AI draft · pending your review. '+(draft.warnings||[]).join(' ');
+}
+function loadSavedAIDraft(){if(REPORT_CTX)applyAIDraft(REPORTS[REPORT_CTX.date]?.aiDraft);}
+async function generateAIReport(){
+  const context=REPORT_CTX;if(!context)return;
+  if(!ONLINE()){toast('Connect the Worker backend to generate AI drafts.');return;}
+  const btn=document.getElementById('repAI');btn.disabled=true;
+  document.getElementById('repAIStatus').textContent='Generating from uploaded session data…';
+  try{
+    const result=await api('/report/ai',{method:'POST',body:JSON.stringify({projectId:context.pid,date:context.date})});
+    if(REPORT_CTX!==context)return;
+    if(result.draft){REPORTS[context.date]={...(REPORTS[context.date]||{}),aiDraft:result.draft};document.getElementById('repLoadAI').disabled=false;applyAIDraft(result.draft);}
+    else document.getElementById('repAIStatus').textContent='No session data is available for this date.';
+  }catch(e){if(REPORT_CTX===context)document.getElementById('repAIStatus').textContent='Generation failed: '+e.message;}
+  finally{if(REPORT_CTX===context)btn.disabled=false;}
+}
+
 /* ================= daily report generator ================= */
 const REPORT_KEY='live_reports_v1';
 let REPORTS={};
@@ -1594,12 +1640,12 @@ const REPORT_SECTIONS=[
 async function getReports(pid,month){
   if(!ONLINE()){ const all=JSON.parse(localStorage.getItem(REPORT_KEY)||'{}'); return all[pid]||{}; }
   try{ const r=await api('/reports?project='+encodeURIComponent(pid)+'&month='+month); const m={};
-    (r.reports||[]).forEach(x=>{ m[x.date]={included:x.included||[],insights:x.insights||{},sentAt:x.sentAt}; }); return m; }
+    (r.reports||[]).forEach(x=>{ m[x.date]={included:x.included||[],insights:x.insights||{},sentAt:x.sentAt,aiDraft:x.aiDraft,aiError:x.aiError,version:x.version}; }); return m; }
   catch(e){ return {}; }
 }
 async function saveReportDB(pid,date,obj){
   if(!ONLINE()){ const all=JSON.parse(localStorage.getItem(REPORT_KEY)||'{}'); (all[pid]=all[pid]||{})[date]=obj; localStorage.setItem(REPORT_KEY,JSON.stringify(all)); return; }
-  await api('/report',{method:'POST',body:JSON.stringify({projectId:pid,date,included:obj.included,insights:obj.insights})});
+  const r=await api('/report',{method:'POST',body:JSON.stringify({projectId:pid,date,included:obj.included,insights:obj.insights,fingerprint:obj.fingerprint,version:obj.version||''})}); obj.version=r.version; if(REPORT_CTX&&REPORT_CTX.pid===pid&&REPORT_CTX.date===date)REPORT_CTX.version=r.version;
 }
 function fget(k,a){ if(k==='dur')return a.hours*3600; if(k==='adSpend')return a.hasAd?a.adSpend:null; return a[k]; }
 function fmtType(type,ag){ const v=ag.__v; switch(type){ case'money':case'mtdMoney':return F.money(v); case'money2':return F.money2(v); case'int':return F.int(v);
@@ -1608,13 +1654,13 @@ function fmtType(type,ag){ const v=ag.__v; switch(type){ case'money':case'mtdMon
 function dayProducts(ss,d){ const t={}; ss.filter(s=>s.date===d).forEach(s=>s.products.forEach(p=>{ if(p.g>0)t[p.n]=(t[p.n]||0)+p.g; })); return t; }
 function dayHostsAll(ss,d){ const set=[]; ss.filter(s=>s.date===d).forEach(s=>(s.hosts||[]).forEach(h=>{ if(h.name&&!set.find(x=>x.name===h.name))set.push(h); })); return set; }
 let REPORT_CTX=null;
-function openReport(pid,date,sessions){
+async function openReport(pid,date,sessions){
   const mStart=monthStart(date);
   const allDates=[...new Set(sessions.map(s=>s.date))].sort(); const idx=allDates.indexOf(date);
   const daySess=sessions.filter(s=>s.date===date).sort((x,y)=>(x.startTime||'').localeCompare(y.startTime||''));
-  const a=agg(daySess); const perAggs=daySess.map(s=>agg([s]));
-  const prev=idx>0?agg(sessions.filter(s=>s.date===allDates[idx-1])):null;
-  const mtd=agg(inRange(sessions,mStart,date));
+  const a=reportAgg(daySess); const perAggs=daySess.map(s=>reportAgg([s]));
+  const prev=idx>0?reportAgg(sessions.filter(s=>s.date===allDates[idx-1])):null;
+  const mtd=reportAgg(inRange(sessions,mStart,date));
   const projName=(document.getElementById('proj').selectedOptions[0]||{}).text||pid;
   const tp=dayProducts(sessions,date); const yp=idx>0?dayProducts(sessions,allDates[idx-1]):{};
   const sorted=Object.entries(tp).sort((x,y)=>y[1]-x[1]);
@@ -1625,7 +1671,8 @@ function openReport(pid,date,sessions){
   const hosts=dayHostsAll(sessions,date);
   const srcCur=daySources(sessions,date), srcPrevMap={}; if(prev)daySources(sessions,allDates[idx-1]).forEach(x=>srcPrevMap[x.k]=x.v);
   const ex=REPORTS[date]||{included:[],insights:{}};
-  REPORT_CTX={pid,date,projName,a,prev,mtd,daySess,top3,highpot,declining,hosts,srcCur};
+  REPORT_CTX={pid,date,projName,a,prev,mtd,daySess,top3,highpot,declining,hosts,srcCur,sessions,version:ex.version||'',fingerprint:null};
+  const opened=REPORT_CTX;
   document.getElementById('repTitle').textContent=projName+' Live-Streaming '+date+' Daily Report';
   const multi=daySess.length>1;
   const dbdBadge=(k)=>{ if(!prev)return ''; const v=fget(k,a),pv=fget(k,prev); if(v==null||pv==null||pv===0||!isFinite(pv))return ''; const p=(v-pv)/Math.abs(pv); const cls=Math.abs(p)<0.001?'tflat':(p>0?'tup':'tdown'); return ` <span class="d-badge ${cls}">${p>0?'▲':'▼'}${Math.abs(p*100).toFixed(0)}%</span>`; };
@@ -1657,7 +1704,7 @@ function openReport(pid,date,sessions){
     const dataHtml=sec.fields.map(fieldRow).join('');
     if(sec.insight){
       html+=`<div class="rsec"><div class="rsh">${sec.title}</div><div class="rsplit"><div class="rdata">${dataHtml}</div>`+
-        `<div class="rins-col"><label class="lb">Insights (one point per line → bullets)</label><textarea class="rins" data-sec="${sec.key}" rows="8" placeholder="One point per line, e.g.\nStrong openers on Beauty Burn\nHost energy dipped after 1h">${(ex.insights&&ex.insights[sec.key])||''}</textarea></div></div></div>`;
+        `<div class="rins-col"><label class="lb">Insights (one point per line → bullets)</label><textarea class="rins" data-sec="${sec.key}" rows="8" placeholder="One point per line, e.g.\nStrong openers on Beauty Burn\nHost energy dipped after 1h">${escAttr((ex.insights&&ex.insights[sec.key])||'')}</textarea></div></div></div>`;
     } else {
       html+=`<div class="rsec"><div class="rsh">${sec.title}</div>${dataHtml}</div>`;
     }
@@ -1665,21 +1712,29 @@ function openReport(pid,date,sessions){
   document.getElementById('reportBody').innerHTML=html;
   document.getElementById('reportBody').querySelectorAll('.finc').forEach(cb=>cb.onchange=e=>{ e.target.closest('.frow').classList.toggle('off',!e.target.checked); });
   document.getElementById('reportModal').style.display='flex';
+  document.getElementById('repAIStatus').textContent=ex.aiError?'AI generation needs attention: '+ex.aiError:'Review required before sending';
+  document.getElementById('repAI').disabled=!ONLINE()||!canUpload(pid);
+  document.getElementById('repLoadAI').disabled=!ex.aiDraft;
+  opened.fingerprint=await reportFingerprint(sessions,date);
+  if(REPORT_CTX!==opened)return;
+  if(ex.aiDraft&&!Object.values(ex.insights||{}).some(Boolean)) applyAIDraft(ex.aiDraft,false);
+
 }
 function closeReport(){ document.getElementById('reportModal').style.display='none'; REPORT_CTX=null; }
 function collectReport(){
   const body=document.getElementById('reportBody');
   const included=[...body.querySelectorAll('.finc:checked')].map(x=>x.dataset.k);
   const insights={}; body.querySelectorAll('.rins').forEach(t=>{ if(t.value.trim())insights[t.dataset.sec]=t.value.trim(); });
-  return {included,insights};
+  return {included,insights,version:REPORT_CTX.version||'',fingerprint:REPORT_CTX.fingerprint};
 }
 async function saveReport(send){
+  if(send)return previewReport();
   if(!REPORT_CTX)return; const {pid,date}=REPORT_CTX; const obj=collectReport();
   try{ await saveReportDB(pid,date,obj); REPORTS[date]=obj; toast('Report saved');
     const btn=document.querySelector('.repbtn[data-date="'+date+'"]'); if(btn)btn.classList.add('on');
     if(send){ if(PREVIEW){ toast('Rendering report image…'); const image=await buildReportImage(obj); const a=document.createElement('a'); a.href=image; a.download=(REPORT_CTX?REPORT_CTX.projName:'report')+'_'+date+'_PREVIEW.png'; document.body.appendChild(a); a.click(); a.remove(); toast('Preview mode — report image downloaded instead of sent'); }
       else if(!ONLINE()){ toast('Sending to Lark works after backend is connected'); }
-      else { toast('Rendering report image…'); const image=await buildReportImage(obj); await api('/report/send',{method:'POST',body:JSON.stringify({projectId:pid,date,image,text:buildReportText(obj)})}); toast('Sent to Lark group'); } }
+      else { toast('Rendering report image…'); const image=await buildReportImage(obj); await api('/report/send',{method:'POST',body:JSON.stringify({projectId:pid,date,image,text:buildReportText(obj),reviewed:true,version:obj.version})}); toast('Sent to Lark group'); } }
     if(!send) closeReport();
   }catch(e){ toast('Failed: '+e.message); }
 }
@@ -1703,18 +1758,21 @@ function showReportPreview(image,obj,pid,date){
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
       <button class="btn sm ghost" id="rpBack">← Back to edit</button>
       <button class="btn sm" id="rpDl">Download PNG</button>
-      <button class="btn sm primary" id="rpSend">Send to Lark</button>
+      <label class="mini"><input type="checkbox" id="rpReviewed"/> I have checked the data and insights</label>
+      <button class="btn sm primary" id="rpSend" disabled>Confirm review &amp; send</button>
     </div></div>`;
   ov.style.display='flex';
   const close=()=>{ ov.style.display='none'; };
   ov.querySelector('#rpX').onclick=close; ov.querySelector('#rpBack').onclick=close;
   ov.onclick=e=>{ if(e.target===ov) close(); };
   ov.querySelector('#rpDl').onclick=()=>{ const a=document.createElement('a'); a.href=image; a.download=(REPORT_CTX?REPORT_CTX.projName:'report')+'_'+date+'.png'; document.body.appendChild(a); a.click(); a.remove(); };
+  ov.querySelector('#rpReviewed').onchange=e=>{ov.querySelector('#rpSend').disabled=!e.target.checked;};
   ov.querySelector('#rpSend').onclick=async()=>{
+    if(!ov.querySelector('#rpReviewed').checked)return;
     if(PREVIEW){ const a=document.createElement('a'); a.href=image; a.download=(REPORT_CTX?REPORT_CTX.projName:'report')+'_'+date+'_PREVIEW.png'; document.body.appendChild(a); a.click(); a.remove(); toast('Preview mode — image downloaded instead of sent'); close(); return; }
     if(!ONLINE()){ toast('Sending to Lark works after the backend is connected'); return; }
     const btn=ov.querySelector('#rpSend'); btn.disabled=true; btn.textContent='Sending…';
-    try{ await api('/report/send',{method:'POST',body:JSON.stringify({projectId:pid,date,image,text:buildReportText(obj)})}); toast('Sent to Lark group'); close(); closeReport(); }
+    try{ await api('/report/send',{method:'POST',body:JSON.stringify({projectId:pid,date,image,text:buildReportText(obj),reviewed:true,version:obj.version})}); toast('Sent to Lark group'); close(); closeReport(); }
     catch(e){ toast('Send failed: '+e.message); btn.disabled=false; btn.textContent='Send to Lark'; }
   };
 }
