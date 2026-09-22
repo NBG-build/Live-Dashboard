@@ -993,6 +993,15 @@ function monthStart(iso){ return iso.slice(0,8)+'01'; }
 function realToday(){ return new Date().toISOString().slice(0,10); }
 
 /* ================= parse xlsx ================= */
+function parseProductRow(row,columns){
+  const get=k=>columns[k]==null?null:row[columns[k]];
+  const numeric=k=>{const v=get(k);if(v==null||String(v).trim()===''||['-','—','N/A'].includes(String(v).trim()))return null;const n=Number(String(v).replace(/[$,%\s]/g,''));return Number.isFinite(n)?(String(v).includes('%')?n/100:n):null;};
+  const fullName=String(get('Product name')||'').trim();
+  const p={n:fullName.split(',')[0].trim().slice(0,60),fullName,id:String(get('Product ID')||'').trim(),g:numeric('Attributed GMV')||0,metricsVersion:1};
+  const fields={itemsSold:'Attributed items sold',impressions:'Product Impressions',clicks:'Product Clicks',ctr:'CTR',stock:'Available stock',createdSkuOrders:'Created SKU orders',skuOrders:'Attributed SKU orders',orders:'Attributed orders',skuCtor:'CTOR (SKU orders)',ctor:'CTOR',watchGpm:'Watch GPM',aov:'Avg. Price (Main orders)',uniqueViewerOrders:'Unique viewer orders',customers:'Customers'};
+  for(const [key,col] of Object.entries(fields))p[key]=numeric(col);
+  return p;
+}
 function parseWorkbook(wb){
   const ws=wb.Sheets['All']; if(!ws) throw new Error('missing All sheet');
   const A=XLSX.utils.sheet_to_json(ws,{header:1,defval:null,raw:false});
@@ -1014,7 +1023,7 @@ function parseWorkbook(wb){
   AVGL_COLS.forEach(c=>{ const j=idx[c]; s['L_'+c]= j==null?[]:rows.map(r=>Math.round(num(r[j])*1e6)/1e6); });
   s.products=[]; const pw=wb.Sheets['Product'];
   if(pw){ const P=XLSX.utils.sheet_to_json(pw,{header:1,defval:null,raw:false}); const pi={}; (P[0]||[]).forEach((h,i)=>pi[String(h).trim()]=i);
-    for(let i=1;i<P.length;i++){ const nm=P[i][pi['Product name']]; if(!nm)continue; s.products.push({n:String(nm).split(',')[0].trim().slice(0,60),g:Math.round(num(P[i][pi['Attributed GMV']])*100)/100,id:pi['Product ID']!=null?String(P[i][pi['Product ID']]||'').trim():''}); } }
+    for(let i=1;i<P.length;i++){ const nm=P[i][pi['Product name']]; if(!nm)continue; s.products.push(parseProductRow(P[i],pi)); } }
   s.source={}; const vw=wb.Sheets['Viewer source'];
   if(vw){ const V=XLSX.utils.sheet_to_json(vw,{header:1,defval:null,raw:false});
     for(let i=1;i<V.length;i++){ const lab=V[i][0]; if(lab==null)continue; const p=pctv(V[i][1]); if(p==null)continue; const k=String(lab).trim(); s.source[k]=Math.round(((s.source[k]||0)+p)*1e5)/1e5; } }
@@ -1628,7 +1637,7 @@ async function reportFingerprint(ss,date){
     room:s.room,date:s.date,dur:s.dur,gmv:s['Attributed GMV'],orders:s.orders,
     views:s['Views'],imp:s['LIVE impression'],clicks:s['Product Clicks'],
     adSpend:s.adSpend,avgViewDur:s.avgViewDur,likes:s['Likes'],followers:s['New followers'],
-    comments:s['Comments'],shares:s['Shares'],products:s.products,source:s.source,hosts:s.hosts
+    comments:s['Comments'],shares:s['Shares'],products:s.products,auction:s.auction||{},source:s.source,hosts:s.hosts
   })).sort((a,b)=>(a.date+'|'+a.room).localeCompare(b.date+'|'+b.room));
   const buf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(rows)));
   return Array.from(new Uint8Array(buf),b=>b.toString(16).padStart(2,'0')).join('');
