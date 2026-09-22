@@ -1696,6 +1696,8 @@ function fmtType(type,ag){ const v=ag.__v; switch(type){ case'money':case'mtdMon
 function dayProducts(ss,d){ const t={}; ss.filter(s=>s.date===d).forEach(s=>s.products.forEach(p=>{ if(p.g>0)t[p.n]=(t[p.n]||0)+p.g; })); return t; }
 function dayHostsAll(ss,d){ const set=[]; ss.filter(s=>s.date===d).forEach(s=>(s.hosts||[]).forEach(h=>{ if(h.name&&!set.find(x=>x.name===h.name))set.push(h); })); return set; }
 let REPORT_CTX=null;
+function reportProductText(n){return n+(REPORT_CTX&&REPORT_CTX.auctionNames&&REPORT_CTX.auctionNames.has(n)?' [AUCTION]':'');}
+function reportProductHTML(n){return productLabel(n)+(REPORT_CTX&&REPORT_CTX.auctionNames&&REPORT_CTX.auctionNames.has(n)?' <span style="display:inline-block;color:#c7f53d;border:1px solid #647c20;border-radius:3px;padding:0 4px;font-size:10px;font-weight:700">AUCTION</span>':'');}
 async function openReport(pid,date,sessions){
   const mStart=monthStart(date);
   const allDates=[...new Set(sessions.map(s=>s.date))].sort(); const idx=allDates.indexOf(date);
@@ -1704,7 +1706,9 @@ async function openReport(pid,date,sessions){
   const prev=idx>0?reportAgg(sessions.filter(s=>s.date===allDates[idx-1])):null;
   const mtd=reportAgg(inRange(sessions,mStart,date));
   const projName=(document.getElementById('proj').selectedOptions[0]||{}).text||pid;
-  const tp=dayProducts(sessions,date); const yp=idx>0?dayProducts(sessions,allDates[idx-1]):{};
+  const productSessions=classificationSessions(sessions);
+  const auctionNames=new Set(productSessions.flatMap(s=>s.products.filter(p=>p.isAuction).map(p=>p.n)));
+  const tp=dayProducts(productSessions,date); const yp=idx>0?dayProducts(productSessions,allDates[idx-1]):{};
   const sorted=Object.entries(tp).sort((x,y)=>y[1]-x[1]);
   const top3=sorted.slice(0,3).map(([n,g])=>[n,g,yp[n]||0]);
   const t5today=sorted.slice(0,5).map(x=>x[0]); const t5y=Object.entries(yp).sort((x,y)=>y[1]-x[1]).slice(0,5).map(x=>x[0]);
@@ -1713,13 +1717,13 @@ async function openReport(pid,date,sessions){
   const hosts=dayHostsAll(sessions,date);
   const srcCur=daySources(sessions,date), srcPrevMap={}; if(prev)daySources(sessions,allDates[idx-1]).forEach(x=>srcPrevMap[x.k]=x.v);
   const ex=REPORTS[date]||{included:[],insights:{}};
-  REPORT_CTX={pid,date,projName,a,prev,mtd,daySess,top3,highpot,declining,hosts,srcCur,sessions,version:ex.version||'',fingerprint:null};
+  REPORT_CTX={pid,date,projName,a,prev,mtd,daySess,top3,highpot,declining,auctionNames,hosts,srcCur,sessions,version:ex.version||'',fingerprint:null};
   const opened=REPORT_CTX;
   document.getElementById('repTitle').textContent=projName+' Live-Streaming '+date+' Daily Report';
   const multi=daySess.length>1;
   const dbdBadge=(k)=>{ if(!prev)return ''; const v=fget(k,a),pv=fget(k,prev); if(v==null||pv==null||pv===0||!isFinite(pv))return ''; const p=(v-pv)/Math.abs(pv); const cls=Math.abs(p)<0.001?'tflat':(p>0?'tup':'tdown'); return ` <span class="d-badge ${cls}">${p>0?'▲':'▼'}${Math.abs(p*100).toFixed(0)}%</span>`; };
   const gbadge=(cur,prv)=>{ if(prv==null||prv===0)return cur>0?' <span class="d-badge tup">NEW</span>':''; const p=(cur-prv)/Math.abs(prv); const cls=Math.abs(p)<0.001?'tflat':(p>0?'tup':'tdown'); return ` <span class="d-badge ${cls}">${p>0?'▲':'▼'}${Math.abs(p*100).toFixed(0)}%</span>`; };
-  const prodList=(arr)=>arr.length?arr.map(([n,g,pg])=>`<div class="prow"><span class="pn">${n}</span><b>$${Math.round(g).toLocaleString()}${gbadge(g,pg)}</b></div>`).join(''):'<div class="mini">None</div>';
+  const prodList=(arr)=>arr.length?arr.map(([n,g,pg])=>`<div class="prow"><span class="pn">${reportProductHTML(n)}</span><b>$${Math.round(g).toLocaleString()}${gbadge(g,pg)}</b></div>`).join(''):'<div class="mini">None</div>';
   // value cell for a scalar field
   function scalarVal(fd){
     if(fd.type==='mtdMoney'){ mtd.__v=mtd.gmv; return fmtType('mtdMoney',mtd); }
@@ -1821,9 +1825,9 @@ function showReportPreview(image,obj,pid,date){
 function buildReportText(obj){
   const c=REPORT_CTX, a=c.a, mtd=c.mtd; let L=[c.projName+' Live-Streaming '+c.date+' Daily Report',''];
   L.push('▸ Quick Summary'); L.push('Sessions '+c.daySess.length+' · GMV '+F.money(a.gmv)+' (MTD '+F.money(mtd.gmv)+') · Hourly GMV '+F.money(a.hourlyGmv)+' · Duration '+F.dur(a.hours*3600)+' (MTD '+F.dur(mtd.hours*3600)+')');
-  L.push(''); L.push('▸ Conversion'); L.push('Top3: '+c.top3.map(([n,g])=>n+' $'+Math.round(g)).join(' | '));
-  if(c.highpot.length)L.push('High-Potential: '+c.highpot.map(([n,g])=>n+' $'+Math.round(g)).join(' | '));
-  if(c.declining.length)L.push('Declining: '+c.declining.map(([n,g,pg])=>n+' $'+Math.round(pg)+'→$'+Math.round(g)).join(' | '));
+  L.push(''); L.push('▸ Conversion'); L.push('Top3: '+c.top3.map(([n,g])=>reportProductText(n)+' $'+Math.round(g)).join(' | '));
+  if(c.highpot.length)L.push('High-Potential: '+c.highpot.map(([n,g])=>reportProductText(n)+' $'+Math.round(g)).join(' | '));
+  if(c.declining.length)L.push('Declining: '+c.declining.map(([n,g,pg])=>reportProductText(n)+' $'+Math.round(pg)+'→$'+Math.round(g)).join(' | '));
   L.push('CTR '+F.pct(a.avgCtr)+' · CTOR '+F.pct(a.avgCtor)+' · AOV '+F.money2(a.aov)); if(obj.insights.conversion)L.push('Insight: '+obj.insights.conversion);
   L.push(''); L.push('▸ Engagement'); L.push('Host: '+(c.hosts.map(h=>h.name).join(', ')||'—')+' · Avg View '+fmtSecShort(a.avgViewDur)+' · New Followers '+F.int(a.newFollowers)+' · Likes '+F.int(a.likes)); if(obj.insights.engagement)L.push('Insight: '+obj.insights.engagement);
   L.push(''); L.push('▸ Traffic'); L.push('Impression '+F.int(a.imp)+' · Enter Rate '+F.pct(a.avgErr)+' · Ad Spend '+(a.hasAd?F.money(a.adSpend):'—')+' · ROI '+(a.roi==null?'—':a.roi.toFixed(2)+'x')); if(obj.insights.traffic)L.push('Insight: '+obj.insights.traffic);
@@ -1844,9 +1848,9 @@ function buildReportCard(obj){
   els.push({tag:'div',fields:[field('GMV',F.money(a.gmv)+arrow('gmv')),field('MTD GMV',F.money(mtd.gmv)),field('Hourly GMV',F.money(a.hourlyGmv)+arrow('hourlyGmv')),field('Live Duration',F.dur(a.hours*3600)+arrow('dur')),field('MTD Duration',F.dur(mtd.hours*3600))]});
   els.push({tag:'hr'});
   els.push(sh('Conversion'));
-  els.push({tag:'div',text:{tag:'lark_md',content:'**Top 3 Products**\n'+c.top3.map(([n,g])=>`• ${n} — **$${Math.round(g).toLocaleString()}**`).join('\n')}});
-  if(c.highpot.length)els.push({tag:'div',text:{tag:'lark_md',content:'**High-Potential**\n'+c.highpot.map(([n,g])=>`• ${n} — $${Math.round(g).toLocaleString()}`).join('\n')}});
-  if(c.declining.length)els.push({tag:'div',text:{tag:'lark_md',content:'**Declining**\n'+c.declining.map(([n,g,pg])=>`• ${n} — $${Math.round(pg).toLocaleString()} → $${Math.round(g).toLocaleString()}`).join('\n')}});
+  els.push({tag:'div',text:{tag:'lark_md',content:'**Top 3 Products**\n'+c.top3.map(([n,g])=>`• ${reportProductText(n)} — **$${Math.round(g).toLocaleString()}**`).join('\n')}});
+  if(c.highpot.length)els.push({tag:'div',text:{tag:'lark_md',content:'**High-Potential**\n'+c.highpot.map(([n,g])=>`• ${reportProductText(n)} — $${Math.round(g).toLocaleString()}`).join('\n')}});
+  if(c.declining.length)els.push({tag:'div',text:{tag:'lark_md',content:'**Declining**\n'+c.declining.map(([n,g,pg])=>`• ${reportProductText(n)} — $${Math.round(pg).toLocaleString()} → $${Math.round(g).toLocaleString()}`).join('\n')}});
   els.push({tag:'div',fields:[field('CTR',F.pct(a.avgCtr)+arrow('avgCtr')),field('CTOR',F.pct(a.avgCtor)+arrow('avgCtor')),field('AOV',F.money2(a.aov)+arrow('aov'))]});
   if(ins.conversion)els.push(insight(ins.conversion));
   els.push({tag:'hr'});
@@ -1877,7 +1881,7 @@ function buildReportImage(obj){
     const gb=(g,pg)=>{ if(pg==null||pg===0)return g>0?` <span style="color:${NEON};font-size:11px">NEW</span>`:''; const p=(g-pg)/Math.abs(pg); if(Math.abs(p)<0.001)return ''; return ` <span style="color:${p>0?NEON:DOWN};font-size:11px">${p>0?'▲':'▼'}${Math.abs(p*100).toFixed(0)}%</span>`; };
     const mc=(l,v)=>`<div style="background:${CARD};border:1px solid ${LINE};border-radius:9px;padding:9px 11px"><div style="color:${MUT};font-size:10px;letter-spacing:.5px">${l}</div><div style="font-size:16px;font-weight:700;margin-top:2px">${v}</div></div>`;
     const prodBlock=(title,list)=>`<div style="margin-bottom:9px"><div style="color:${MUT};font-size:10px;letter-spacing:.5px;margin-bottom:3px">${title}</div>`+
-      (list.length?list.map(([n,g,pg])=>`<div style="display:flex;justify-content:space-between;gap:10px;line-height:1.5;align-items:baseline;margin-bottom:2px"><span style="color:${SUB};min-width:0;overflow-wrap:anywhere;word-break:break-word">${n}</span><span style="white-space:nowrap;flex:none"><b>$${Math.round(g).toLocaleString()}</b>${gb(g,pg)}</span></div>`).join(''):`<div style="color:#5c6553;font-size:11px">None</div>`)+`</div>`;
+      (list.length?list.map(([n,g,pg])=>`<div style="display:flex;justify-content:space-between;gap:10px;line-height:1.5;align-items:baseline;margin-bottom:2px"><span style="color:${SUB};min-width:0;overflow-wrap:anywhere;word-break:break-word">${reportProductHTML(n)}</span><span style="white-space:nowrap;flex:none"><b>$${Math.round(g).toLocaleString()}</b>${gb(g,pg)}</span></div>`).join(''):`<div style="color:#5c6553;font-size:11px">None</div>`)+`</div>`;
     const row=(l,v)=>`<div style="display:flex;justify-content:space-between;gap:10px;line-height:1.7;align-items:baseline"><span style="color:${SUB};min-width:0;overflow-wrap:anywhere">${l}</span><b style="white-space:nowrap;flex:none">${v}</b></div>`;
     const bullets=(txt)=>{ if(!txt||!String(txt).trim())return '<span style="color:#5c6553">—</span>';
       let lines=String(txt).split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
