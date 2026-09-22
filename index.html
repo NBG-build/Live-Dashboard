@@ -1388,47 +1388,89 @@ function renderFunnel(A,P){
   }).join('');
 }
 
+// Regular and auction exports contain separate sales. Sum both sources by PID
+// for each session, then use the same product universe across both periods.
+function classificationSessions(sessions){
+  const names=new Map(), auctionIds=new Set(), idOf=x=>String(x==null?'':x).trim();
+  sessions.forEach(s=>Object.entries(s.auction||{}).forEach(([pid,a])=>{
+    const id=idOf(pid); if(!id||!a)return;
+    auctionIds.add(id); names.set(id,String(a.name||'').trim()||`Auction product ${id}`);
+  }));
+  sessions.forEach(s=>(s.products||[]).forEach(p=>{const id=idOf(p.id);if(id&&p.n)names.set(id,p.n);}));
+  const counts=new Map(); names.forEach(n=>counts.set(n,(counts.get(n)||0)+1));
+  names.forEach((n,id)=>{if(counts.get(n)>1)names.set(id,`${n} [PID ${id}]`);});
+  return sessions.map(s=>{
+    const products=[], seen=new Set(), auction=Object.create(null);
+    (s.products||[]).forEach(p=>{
+      const id=idOf(p.id);
+      if(id&&seen.has(id)){products.find(x=>x.id===id).g+=Number(p.g)||0;return;}
+      if(id)seen.add(id);
+      products.push({...p,id,g:Number(p.g)||0,n:id?names.get(id)||p.n:p.n,isAuction:auctionIds.has(id)});
+    });
+    Object.entries(s.auction||{}).forEach(([pid,a])=>{
+      const id=idOf(pid);if(!id||!a)return;
+      const n=names.get(id);auction[id]={...a,name:n};
+      if(seen.has(id))products.find(p=>p.id===id).g+=Number(a.gmv)||0;
+      else {products.push({id,n,g:Number(a.gmv)||0,isAuction:true});seen.add(id);}
+    });
+    return {...s,products,auction};
+  });
+}
+function productLabel(n){return String(n).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function prodTotals(ss){ const t={}; ss.forEach(s=>s.products.forEach(p=>{ if(p.g>0)t[p.n]=(t[p.n]||0)+p.g; })); return t; }
 function top5DayCount(ss){ const dates=[...new Set(ss.map(s=>s.date))]; const cnt={};
   dates.forEach(d=>{ const dt={}; ss.filter(s=>s.date===d).forEach(s=>s.products.forEach(p=>{ if(p.g>0)dt[p.n]=(dt[p.n]||0)+p.g; }));
     Object.entries(dt).sort((a,b)=>b[1]-a[1]).slice(0,5).forEach(([n])=>cnt[n]=(cnt[n]||0)+1); }); return cnt; }
-/* which product NAMEs (as used in prodTotals) are auction listings, by cross-referencing product IDs
-   carried on s.products against the IDs that appear as keys in any session's s.auction —
-   returns { name: {gmv,itemsSold,rounds,avgStartBid,avgSalePrice,upliftPct,avgBidders,avgDuration,unsoldRounds,unsoldRate} } */
+/* Auction records are the source of truth. Product-list IDs only supply display
+   names; missing product-list entries must never hide saved auction data. */
 function auctionStatsByName(ss){
-  const nameIds={}; const byId={};
-  ss.forEach(s=>{ (s.products||[]).forEach(p=>{ if(p.id){ (nameIds[p.n]=nameIds[p.n]||new Set()).add(p.id); } });
-    Object.entries(s.auction||{}).forEach(([pid,a])=>{
-      if(!byId[pid]) byId[pid]={gmv:0,itemsSold:0,rounds:0,startSum:0,saleSum:0,bidSum:0,durSum:0,unsoldRounds:0};
-      const t=byId[pid], r=a.rounds||0;
-      t.gmv+=a.gmv||0; t.itemsSold+=a.itemsSold||0; t.rounds+=r;
-      t.startSum+=(a.avgStartBid||0)*r; t.saleSum+=(a.avgSalePrice||0)*r; t.bidSum+=(a.avgBidders||0)*r; t.durSum+=(a.avgDuration||0)*r;
-      t.unsoldRounds+=a.unsoldRounds||0; // rounds with no Winner (流拍), summed across every session this product auctioned in
-    }); });
-  const out={};
-  Object.entries(nameIds).forEach(([n,ids])=>{
-    const t={gmv:0,itemsSold:0,rounds:0,startSum:0,saleSum:0,bidSum:0,durSum:0,unsoldRounds:0}; let hit=false;
-    ids.forEach(id=>{ if(byId[id]){ hit=true; Object.keys(t).forEach(k=>t[k]+=byId[id][k]); } });
-    if(hit) out[n]={ gmv:t.gmv, itemsSold:t.itemsSold, rounds:t.rounds,
-      avgStartBid:t.rounds?t.startSum/t.rounds:0, avgSalePrice:t.rounds?t.saleSum/t.rounds:0,
-      upliftPct:t.rounds&&t.startSum?(t.saleSum-t.startSum)/t.startSum:0,
-      avgBidders:t.rounds?t.bidSum/t.rounds:0, avgDuration:t.rounds?t.durSum/t.rounds:0,
-      unsoldRounds:t.unsoldRounds, unsoldRate:t.rounds?t.unsoldRounds/t.rounds:0 };
+  const productNames=new Map(), byId=new Map();
+  const empty=()=>({gmv:0,itemsSold:0,rounds:0,startSum:0,saleSum:0,bidSum:0,durSum:0,unsoldRounds:0});
+  const idOf=id=>String(id==null?'':id).trim();
+  ss.forEach(s=>(s.products||[]).forEach(p=>{
+    const id=idOf(p.id); if(id&&p.n)productNames.set(id,p.n);
+  }));
+  ss.forEach(s=>Object.entries(s.auction||{}).forEach(([pid,a])=>{
+    if(!a||typeof a!=='object')return;
+    const id=idOf(pid); if(!id)return;
+    if(!byId.has(id))byId.set(id,{name:'',totals:empty()});
+    const entry=byId.get(id), t=entry.totals, r=a.rounds||0;
+    if(a.name&&String(a.name).trim())entry.name=String(a.name).trim();
+    t.gmv+=a.gmv||0; t.itemsSold+=a.itemsSold||0; t.rounds+=r;
+    t.startSum+=(a.avgStartBid||0)*r; t.saleSum+=(a.avgSalePrice||0)*r;
+    t.bidSum+=(a.avgBidders||0)*r; t.durSum+=(a.avgDuration||0)*r;
+    t.unsoldRounds+=a.unsoldRounds||0;
+  }));
+  const byName=new Map();
+  byId.forEach(({name,totals},id)=>{
+    const n=productNames.get(id)||name||`Auction product ${id}`;
+    if(!byName.has(n))byName.set(n,empty());
+    const t=byName.get(n); Object.keys(t).forEach(k=>t[k]+=totals[k]);
+  });
+  const out=Object.create(null);
+  byName.forEach((t,n)=>{
+    out[n]={gmv:t.gmv,itemsSold:t.itemsSold,rounds:t.rounds,
+      avgStartBid:t.rounds?t.startSum/t.rounds:0,avgSalePrice:t.rounds?t.saleSum/t.rounds:0,
+      upliftPct:t.startSum?(t.saleSum-t.startSum)/t.startSum:0,
+      avgBidders:t.rounds?t.bidSum/t.rounds:0,avgDuration:t.rounds?t.durSum/t.rounds:0,
+      unsoldRounds:t.unsoldRounds,unsoldRate:t.rounds?t.unsoldRounds/t.rounds:0};
   });
   return out;
 }
 function auctStatBlurb(a){ if(!a)return ''; const pct=(a.unsoldRate*100), warn=pct>=30;
   return `<span class="mini auctstat">🔨 ${a.rounds} round${a.rounds===1?'':'s'} · avg bid $${a.avgStartBid.toFixed(0)}→$${a.avgSalePrice.toFixed(0)} (${a.upliftPct>=0?'+':''}${(a.upliftPct*100).toFixed(0)}%) · ~${a.avgBidders.toFixed(1)} bidders/round · <span class="${warn?'warnc':''}">流拍率 ${pct.toFixed(0)}%</span> (${a.unsoldRounds}/${a.rounds} rounds no winner)</span>`; }
 function renderProducts(sessions,R){
+  sessions=classificationSessions(sessions);
   const inR=inRange(sessions,R.start,R.end), inP=inRange(sessions,R.pStart,R.pEnd);
   const dates=[...new Set(inR.map(s=>s.date))].sort();
   const totC=prodTotals(inR), totP=prodTotals(inP);
-  const auctStats=auctionStatsByName(inR); const auctNames=new Set(Object.keys(auctStats));
+  const auctStats=auctionStatsByName(inR);
+  const auctNames=new Set(sessions.flatMap(s=>s.products.filter(p=>p.isAuction).map(p=>p.n)));
   const totalGmv=Object.values(totC).reduce((a,b)=>a+b,0)||1;
   const top3=Object.entries(totC).sort((a,b)=>b[1]-a[1]).slice(0,3);
   // Top-3 cards, each with its own GMV sparkline
   document.getElementById('prodCards').innerHTML=top3.map(([n,g],i)=>
-    `<div class="pc"><div class="rk">Top ${i+1}</div><div class="nm">${n}${auctNames.has(n)?'<span class="tg auct">AUCTION</span>':''}</div><div class="g">$${Math.round(g).toLocaleString()}</div>
+    `<div class="pc"><div class="rk">Top ${i+1}</div><div class="nm">${productLabel(n)}${auctNames.has(n)?'<span class="tg auct">AUCTION</span>':''}</div><div class="g">$${Math.round(g).toLocaleString()}</div>
      <div class="mini">${(g/totalGmv*100).toFixed(1)}% of period GMV · ${deltaBadge(g,totP[n])}</div>
      ${auctNames.has(n)?auctStatBlurb(auctStats[n]):''}
      <div class="spark"><canvas id="c_sp${i}"></canvas></div></div>`).join('')
@@ -1450,16 +1492,16 @@ function renderProducts(sessions,R){
   const M=v=>'$'+Math.round(v).toLocaleString();
   const tagTxt={hot:'HOT ▲',dec:'DECREASING ▼',hero:'HERO'};
   const auctTag=n=>auctNames.has(n)?'<span class="tg auct">AUCTION</span>':'';
-  const auctLine=n=>auctNames.has(n)?`<div class="auctline">${auctStatBlurb(auctStats[n])}</div>`:'';
-  const heroRows=hero.length?hero.map(h=>`<div class="clsrow-wrap"><div class="clsrow"><span class="pn">${h.p}</span><span class="pv">${M(h.pr)} → ${M(h.c)}</span><span class="tg ${h.tag}">${tagTxt[h.tag]}</span>${auctTag(h.p)}</div>${auctLine(h.p)}</div>`).join(''):'<div class="emptyc">None</div>';
-  const potRows=potential.length?potential.map(h=>`<div class="clsrow-wrap"><div class="clsrow"><span class="pn">${h.p}</span><span class="pv"><span class="arrowg">${M(h.pr)} → ${M(h.c)}</span></span>${auctTag(h.p)}</div>${auctLine(h.p)}</div>`).join(''):'<div class="emptyc">None</div>';
-  const decRows=declining.length?declining.map(h=>`<div class="clsrow-wrap"><div class="clsrow"><span class="pn">${h.p}</span><span class="pv"><span class="arrowr">${M(h.pr)} → ${M(h.c)}</span></span>${auctTag(h.p)}</div>${auctLine(h.p)}</div>`).join(''):'<div class="emptyc">None</div>';
+  const auctLine=n=>auctStats[n]?`<div class="auctline">${auctStatBlurb(auctStats[n])}</div>`:'';
+  const heroRows=hero.length?hero.map(h=>`<div class="clsrow-wrap"><div class="clsrow"><span class="pn">${productLabel(h.p)}</span><span class="pv">${M(h.pr)} → ${M(h.c)}</span><span class="tg ${h.tag}">${tagTxt[h.tag]}</span>${auctTag(h.p)}</div>${auctLine(h.p)}</div>`).join(''):'<div class="emptyc">None</div>';
+  const potRows=potential.length?potential.map(h=>`<div class="clsrow-wrap"><div class="clsrow"><span class="pn">${productLabel(h.p)}</span><span class="pv"><span class="arrowg">${M(h.pr)} → ${M(h.c)}</span></span>${auctTag(h.p)}</div>${auctLine(h.p)}</div>`).join(''):'<div class="emptyc">None</div>';
+  const decRows=declining.length?declining.map(h=>`<div class="clsrow-wrap"><div class="clsrow"><span class="pn">${productLabel(h.p)}</span><span class="pv"><span class="arrowr">${M(h.pr)} → ${M(h.c)}</span></span>${auctTag(h.p)}</div>${auctLine(h.p)}</div>`).join(''):'<div class="emptyc">None</div>';
   // Auction Products — every auctioned SKU ranked by GMV this period, same clsgrp/clsrow visual
   // language as Hero/Potential/Declining above, rather than a separate wide table. Most auction
   // listings are long-tail (rarely crack the Top-5-half-the-days bar used for hero/decline), so this
   // group exists to give them visibility even when they don't otherwise appear above.
   const auctList=Object.entries(auctStats).sort((a,b)=>b[1].gmv-a[1].gmv);
-  const auctRows=auctList.length?auctList.map(([n,a])=>`<div class="clsrow-wrap"><div class="clsrow"><span class="pn">${n}</span><span class="pv">${M(a.gmv)}</span></div>${auctStatBlurb(a)?`<div class="auctline">${auctStatBlurb(a)}</div>`:''}</div>`).join(''):'<div class="emptyc">None</div>';
+  const auctRows=auctList.length?auctList.map(([n,a])=>`<div class="clsrow-wrap"><div class="clsrow"><span class="pn">${String(n).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}</span><span class="pv">${M(a.gmv)}</span><span class="tg auct">AUCTION</span></div>${auctStatBlurb(a)?`<div class="auctline">${auctStatBlurb(a)}</div>`:''}</div>`).join(''):'<div class="emptyc">None</div>';
   document.getElementById('prodClass').innerHTML=
     `<div class="clsgrp clshero"><h4>★ Hero Products <span class="mini" style="text-transform:none;letter-spacing:0">in Top 5 &gt; half the days in BOTH periods · tagged HOT (+15%) / DECREASING (−15%)</span></h4>${heroRows}</div>`+
     `<div class="clsgrp clspot"><h4>▲ High-Potential Products <span class="mini" style="text-transform:none;letter-spacing:0">newly qualifying in Top 5 this period</span></h4>${potRows}</div>`+
