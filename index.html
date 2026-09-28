@@ -855,7 +855,7 @@ async function renderProjectHealth(){
 async function renderPL(pid,sessions,R,A){
   const box=document.getElementById('plBox');
   await ensurePricingLoaded(pid);
-  const hours=A.hours, gmv=A.gmv;
+  const hours=A.billedHours, gmv=A.gmv;
   const flatFee=evalFlatFee(PRICING.fee,hours), commission=evalCommission(PRICING.commission,gmv);
   const revenue=flatFee+commission;
   const feeTier=whichFeeTier(PRICING.fee,hours), commTier=whichCommTier(PRICING.commission,gmv);
@@ -1253,10 +1253,10 @@ function agg(ss){
     SUM_COLS.forEach(c=>sums[c]+=s[c]||0);
     L.err.push(...(s['L_Enter room rate']||[])); L.ctr.push(...(s['L_CTR']||[])); L.ctor.push(...(s['L_CTOR (SKU orders)']||[]));
     L.gpm.push(...(s['L_GPM']||[])); L.viewers.push(...(s['L_Viewers']||[])); L.views.push(...(s['L_Views']||[])); });
-  // "hours" is the BILLED/displayed duration net of any hours waived for poor-quality streams
-  // (raw broadcast duration minus hoursWaived); rawHours keeps the unadjusted figure for reference.
-  const rawHours=dur/3600, hours=Math.max(0,rawHours-hoursWaived), dc=days.size||1;
-  return { n:ss.length, dcount:days.size, hours, rawHours, hoursWaived, campaignHours:campaignDur/3600, campaigns:[...campaignSet], dur, gmv:sums['Attributed GMV'], imp:sums['LIVE impression'],
+  // Performance metrics always use actual broadcast hours.
+  // Waivers affect only report duration and billing, never performance denominators.
+  const rawHours=dur/3600, hours=rawHours, billedHours=Math.max(0,rawHours-hoursWaived), dc=days.size||1;
+  return { n:ss.length, dcount:days.size, hours, rawHours, billedHours, hoursWaived, campaignHours:campaignDur/3600, campaigns:[...campaignSet], dur, gmv:sums['Attributed GMV'], imp:sums['LIVE impression'],
     prodImp:sums['Product Impressions'], prodClk:sums['Product Clicks'], viewsSum:sums['Views'], viewersSum:sums['Viewers'],
     items:sums['Attributed items sold'], customers:sums['Customers'], likes:sums['Likes'], shares:sums['Shares'], comments:sums['Comments'], newFollowers:sums['New followers'], orders, adSpend, hasAd,
     avgViewDur: vd.length? mean(vd):null,
@@ -1343,7 +1343,7 @@ async function renderOverview(sessions,R,A){
   const campNames=[...new Set(mtdSessions.filter(s=>s.campaign).map(s=>s.campaign))];
   // MTD Revenue (from Project Settings pricing) and MTD Host+Mod Cost — same math as Section 07, MTD basis
   await ensurePricingLoaded(pid);
-  const mtdFlatFee=evalFlatFee(PRICING.fee,mtdA.hours), mtdCommission=evalCommission(PRICING.commission,mtdA.gmv);
+  const mtdFlatFee=evalFlatFee(PRICING.fee,mtdA.billedHours), mtdCommission=evalCommission(PRICING.commission,mtdA.gmv);
   const mtdRevenue=mtdFlatFee+mtdCommission;
   let mtdCost=null,mtdCostErr=false;
   try{ if(ONLINE()){ const r=await api('/project/cost?project='+encodeURIComponent(pid)+'&start='+mStart+'&end='+R.today); mtdCost=r.cost; }
@@ -1355,7 +1355,7 @@ async function renderOverview(sessions,R,A){
     ['MTD GMV Completion',gmvComp==null?'—':gmvComp.toFixed(0)+'%',g.gmv?('goal $'+(+g.gmv).toLocaleString()):'no goal set','hi'],
     ['MTD Revenue',F.money(mtdRevenue),'fee $'+Math.round(mtdFlatFee).toLocaleString()+' + commission $'+Math.round(mtdCommission).toLocaleString(),'hi'],
     ['MTD Host+Mod Cost',mtdCost==null?'—':F.money(mtdCost),mtdCost==null?(mtdCostErr?'no permission or no data':'no data'):'biweekly-rate slices, this project',''],
-    ['MTD Hours',fmtDur(mtdA.hours*3600),mtdA.dcount+' days'+(mtdA.hoursWaived>0?` · ${mtdA.hoursWaived.toFixed(1)}h waived`:''),''],
+    ['MTD Hours',fmtDur(mtdA.hours*3600),mtdA.dcount+' days'+(mtdA.hoursWaived>0?` · ${mtdA.hoursWaived.toFixed(1)}h waived for billing`:''),''],
     ['MTD Hours Completion',hrComp==null?'—':hrComp.toFixed(0)+'%',g.hours?('goal '+g.hours+'h'):'no goal set','hi'],
     ['Total Ad Spend',A.hasAd?F.money(A.adSpend):'—','selected period',''],
     ['Total ROI',A.roi==null?'—':A.roi.toFixed(2)+'x',A.hasAd?'GMV / Ad spend':'ad spend missing',''],
@@ -1573,7 +1573,7 @@ async function renderDaily(sessions,R){
     GRP_ORDER.map(([g,col])=>`<th colspan="${gCount[g]}" style="text-align:center;color:${col}">${g}</th>`).join('')+'</tr>'+
     '<tr>'+GRP_ORDER.flatMap(([g])=>DCOLS.filter(c=>c.grp===g)).map(c=>`<th>${c.lab}</th>`).join('')+'</tr></thead>';
   const orderedCols=[...DCOLS.filter(c=>!c.grp),...GRP_ORDER.flatMap(([g])=>DCOLS.filter(c=>c.grp===g))];
-  const rd=dates.map(d=>({d,a:reportAgg(inRange(inR,d,d))}));
+  const rd=dates.map(d=>({d,a:agg(inRange(inR,d,d))}));
   const colspan=orderedCols.length+1;
   let body='<tbody>';
   rd.forEach((r,i)=>{ const prev=i>0?rd[i-1].a:null, a=r.a; const hasRep=REPORTS[r.d];
@@ -1589,7 +1589,7 @@ async function renderDaily(sessions,R){
     }).join('')+'</tr>';
     // per-session sub-rows (hidden)
     const sess=inRange(inR,r.d,r.d).sort((x,y)=>(x.startTime||'').localeCompare(y.startTime||''));
-    if(sess.length>1){ sess.forEach((ss,si)=>{ const sa=reportAgg([ss]);
+    if(sess.length>1){ sess.forEach((ss,si)=>{ const sa=agg([ss]);
       body+=`<tr class="sessrow" data-date="${r.d}" style="display:none"><td style="padding-left:22px;color:var(--muted)">↳ Session ${si+1}${ss.startTime?` ${ss.startTime}–${ss.endTime}`:''}</td>`+
         orderedCols.map(col=> col.k==='n'?'<td></td>':`<td>${col.disp(sa)}</td>`).join('')+'</tr>'; }); }
     // impression detail row: viewer source, day-over-day
@@ -1628,13 +1628,14 @@ async function renderGoals(sessions,today){
 
 
 function reportAgg(ss){
-  const a=agg(ss); a.hours=a.rawHours;
+  // All report duration-based metrics use hours after waivers.
+  const a=agg(ss); a.hours=a.billedHours;
   a.hourlyGmv=a.hours?a.gmv/a.hours:0; a.impPerHour=a.hours?a.imp/a.hours:0;
   return a;
 }
 async function reportFingerprint(ss,date){
   const rows=ss.filter(s=>s.date<=date).map(s=>({
-    room:s.room,date:s.date,dur:s.dur,gmv:s['Attributed GMV'],orders:s.orders,
+    room:s.room,date:s.date,dur:s.dur,hoursWaived:s.hoursWaived||0,reportHoursBasis:'net-v1',gmv:s['Attributed GMV'],orders:s.orders,
     views:s['Views'],imp:s['LIVE impression'],clicks:s['Product Clicks'],
     adSpend:s.adSpend,avgViewDur:s.avgViewDur,likes:s['Likes'],followers:s['New followers'],
     comments:s['Comments'],shares:s['Shares'],products:s.products,auction:s.auction||{},source:s.source,hosts:s.hosts
