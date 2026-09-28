@@ -581,13 +581,14 @@ function agg(ss){
 
 
 function reportAgg(ss){
-  const a=agg(ss); a.hours=a.rawHours;
+  // All report duration-based metrics use hours after waivers.
+  const a=agg(ss);
   a.hourlyGmv=a.hours?a.gmv/a.hours:0; a.impPerHour=a.hours?a.imp/a.hours:0;
   return a;
 }
 async function reportFingerprint(ss,date){
   const rows=ss.filter(s=>s.date<=date).map(s=>({
-    room:s.room,date:s.date,dur:s.dur,gmv:s['Attributed GMV'],orders:s.orders,
+    room:s.room,date:s.date,dur:s.dur,hoursWaived:s.hoursWaived||0,reportHoursBasis:'net-v1',gmv:s['Attributed GMV'],orders:s.orders,
     views:s['Views'],imp:s['LIVE impression'],clicks:s['Product Clicks'],
     adSpend:s.adSpend,avgViewDur:s.avgViewDur,likes:s['Likes'],followers:s['New followers'],
     comments:s['Comments'],shares:s['Shares'],products:s.products,auction:s.auction||{},source:s.source,hosts:s.hosts
@@ -736,8 +737,8 @@ function aiEvidence(ss,date){
   if(today.some(s=>s.avgViewDur==null))warnings.push('Average viewing duration is missing for at least one session.');
   if(today.length>1)warnings.push('Average viewing duration uses the existing unweighted session mean; session-level unique-viewer weights are unavailable.');
   if(!p)warnings.push('No previous streaming day is available; no day-over-day conclusion can be drawn.');
-  if(a.hoursWaived)warnings.push('Performance uses actual broadcast hours. Waived billing hours are excluded only in the financial module.');
-  if(!a.hours)warnings.push('Broadcast duration is zero or missing. Hourly performance is unavailable.');
+  if(a.hoursWaived)warnings.push('Report duration and all hourly report metrics use hours after waivers. Internal dashboard performance uses actual broadcast hours.');
+  if(!a.hours)warnings.push('Report duration after waivers is zero or missing. Hourly performance is unavailable.');
   if(!products.size)warnings.push('No product breakdown is available.');
   warnings.push('Inventory, host behavior and GMV Max attributed ROI are not verified by these uploaded metrics.');
   return {facts,warnings,previousDate:prevDate||null,sessionCount:today.length};
@@ -885,11 +886,11 @@ async function createAIDraft(env,pid,date,{manual=false}={}){
   const history=historicalReasoningReports(rows,pid,date);
   const historyHash=await historyDigest(history);
   const cached=parseAI(existing?.fields.aiDraftJson);
-  if(cached?.generationVersion===6&&cached?.fingerprint===data.fingerprint&&cached?.historyHash===historyHash)return {draft:cached,cached:true};
+  if(cached?.generationVersion===7&&cached?.fingerprint===data.fingerprint&&cached?.historyHash===historyHash)return {draft:cached,cached:true};
   const evidence=aiEvidence(data.ss,date);
   const retrieval=retrieveHistoricalReasoning(history,evidence);
   const generated=await callReportAI(env,evidence,retrieval.cases);
-  const draft={insights:generated.insights,fingerprint:data.fingerprint,generatedAt:new Date().toISOString(),model:env.OPENAI_MODEL,warnings:[...generated.warnings,...evidence.warnings],generationMode:generated.mode,generationVersion:6,historyHash,historyRetrieval:{scannedReports:retrieval.scannedReports,selectedReports:retrieval.selectedReports,selectedPassages:retrieval.cases.length,inputCharacters:retrieval.inputCharacters},historyReportCount:history.length,historySameProjectCount:history.filter(r=>r.sameProject).length,status:'pending_review'};
+  const draft={insights:generated.insights,fingerprint:data.fingerprint,generatedAt:new Date().toISOString(),model:env.OPENAI_MODEL,warnings:[...generated.warnings,...evidence.warnings],generationMode:generated.mode,generationVersion:7,historyHash,historyRetrieval:{scannedReports:retrieval.scannedReports,selectedReports:retrieval.selectedReports,selectedPassages:retrieval.cases.length,inputCharacters:retrieval.inputCharacters},historyReportCount:history.length,historySameProjectCount:history.filter(r=>r.sameProject).length,status:'pending_review'};
   // Re-read after inference: only draft columns change, never saved operator insights.
   const latest=await findByField(env,env.REPORTS_TABLE_ID,'key',key);
   if(latest)await updateRecord(env,env.REPORTS_TABLE_ID,latest.record_id,{aiDraftJson:JSON.stringify(draft),aiError:''});
