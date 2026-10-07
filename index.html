@@ -1151,6 +1151,7 @@ function renderPending(){
       ? `<div class="mini" style="margin-top:9px;color:var(--neon)">✓ Auction detail attached — ${auctN} product(s)${(p.auctionFiles||[]).length?` (${p.auctionFiles.join(', ')})`:''} <span class="hx" data-i="${i}" data-auctionremove="1" title="Remove auction data" style="margin-left:6px;cursor:pointer">✕</span></div>`
       : `<div class="mini" style="margin-top:9px">No auction detail file attached yet. <button class="btn sm ghost auctattach" data-i="${i}" type="button" style="margin-left:6px;padding:3px 8px">+ Attach auction file</button>${PENDING_AUCTION_UNMATCHED.length?` <select class="auctpick" data-i="${i}" style="margin-left:6px"><option value="">— or pick unmatched (${PENDING_AUCTION_UNMATCHED.length})</option>${PENDING_AUCTION_UNMATCHED.map((e,ei)=>`<option value="${ei}">${e.fileName}</option>`).join('')}</select>`:''}</div>`;
     return `<div class="pcard">
+    ${p.uploadError?`<div class="mini warnc" style="margin-bottom:8px;white-space:pre-wrap;overflow-wrap:anywhere">Upload failed: ${escAttr(p.uploadError)}</div>`:''}
     <div class="ph"><span class="d">${p.s.date} · ${p.s.creator}</span><span class="x" data-i="${i}">✕</span></div>
     <div class="mini">${fmtDur(p.s.dur)} · GMV $${Math.round(p.s['Attributed GMV']).toLocaleString()} · ${p.s.orders} orders${p.s.startTime?` · ${p.s.startTime}–${p.s.endTime}`:''}${p.s.dur<3600?' · <span class="warnc">short &lt;1h</span>':''}${waived>0?` · <span class="warnc">net ${netH.toFixed(1)}h after ${waived}h waived</span>`:''}</div>
     <div class="rowm">
@@ -1229,12 +1230,16 @@ async function commitPending(){
     p.s.poc=(p.poc||'').trim(); p.s.hoursWaived=p.hoursWaived===''?0:num(p.hoursWaived); p.s.campaign=p.isCampaign?(p.campaign||'').trim():'';
     p.s.hosts=(p.hosts||[]).filter(h=>h.name.trim()).map(h=>({name:h.name.trim().toUpperCase(),start:h.start,end:h.end})); });
   if(ONLINE()){
-    let n=0,upd=0,err=0;
+    let n=0,upd=0;
+    const failed=[];
     for(const p of PENDING){ const pid=p.s.shop||p.s.creator;
-      if(!canUpload(pid)){ toast('No upload permission for '+pid); err++; continue; }
+      if(!canUpload(pid)){ p.uploadError='No upload permission for '+pid; failed.push(p); continue; }
       try{ const r=await api('/ingest',{method:'POST',body:JSON.stringify({session:p.s})}); delete _sessCache[pid]; if(r.updated){upd++;}else{n++;} }
-      catch(e){ toast('Upload failed: '+e.message); err++; } }
-    PENDING=[]; renderPending(); toast((n?('Uploaded '+n+' new'):'')+(upd?((n?' · ':'')+'updated '+upd+' existing (same Room ID — edits applied)'):'')+(err?(' · '+err+' failed'):'')||'Nothing to upload'); render(); return;
+      catch(e){ p.uploadError=e.message; failed.push(p); }
+    }
+    PENDING=failed; renderPending();
+    const summary=[n?('Uploaded '+n+' new'):'',upd?('Updated '+upd+' existing'):'',failed.length?(failed.length+' failed — retained for retry'):''].filter(Boolean).join(' · ');
+    toast(summary||'Nothing to upload'); render(); return;
   }
   const db=loadDB(); let n=0; PENDING.forEach(p=>{ db.sessions[p.s.room]=p.s; n++; }); saveDB(db);
   PENDING=[]; renderPending(); toast('Committed to database: '+n+' session(s)'); render();
