@@ -150,6 +150,8 @@ async function upsert(env, tableId, keyField, keyVal, fields) {
 
 /* session table schema (created on demand) */
 const NUM = 2, TXT = 1;
+const PRODUCT_CHUNK_SIZE = 90000;
+const PRODUCT_CHUNK_FIELDS = ['productsJson', ...Array.from({ length: 7 }, (_, i) => 'productsJson' + (i + 2))];
 const SESSION_FIELDS = [
   ['roomId', TXT], ['date', TXT], ['creator', TXT], ['shop', TXT], ['durationSec', NUM], ['slices', NUM],
   ['gmv', NUM], ['orders', NUM], ['items', NUM], ['customers', NUM], ['viewers', NUM], ['totalViewers', NUM],
@@ -161,6 +163,8 @@ const SESSION_FIELDS = [
   /* --- added: per-product auction-round detail (Starting bid / Sale price / Bidders / Duration),
      parsed client-side from the companion "..._auction.xlsx" export and merged in at upload time --- */
   ['auctionJson', TXT],
+  ['productsJsonParts', TXT],
+  ...PRODUCT_CHUNK_FIELDS.slice(1).map(name => [name, TXT]),
 ];
 /* _Registry columns for per-project pricing (flat fee / commission, simple or tiered) + contract archive.
    Auto-created the same way USER_FIELDS is, so nobody has to add Bitable columns by hand. */
@@ -288,6 +292,8 @@ async function ensureProjectTable(env, projectId, name) {
       body: JSON.stringify({ table: { name: tableName, fields: SESSION_FIELDS.map(([field_name, type]) => ({ field_name, type })) } }),
     });
     tableId = d.table_id;
+    if (!tableId) throw new Error("Project table creation returned no table ID");
+    await ensureFields(env, tableId);
   }
   // create/refresh the _Registry pointer for this projectId
   if (reg) await updateRecord(env, env.REGISTRY_TABLE_ID, reg.record_id, { projectId, name: name || projectId, tableId, createdAt: new Date().toISOString() });
@@ -412,6 +418,36 @@ function payPeriodForDate(dateStr) {
 }
 
 /* ---------------- session <-> record ---------------- */
+// Keep each text field below Lark's limit; never truncate product data.
+function productFields(products) {
+  const serialized = JSON.stringify(products || []);
+  const chunks = [];
+  for (let start = 0; start < serialized.length;) {
+    let end = Math.min(start + PRODUCT_CHUNK_SIZE, serialized.length);
+    // Do not split a UTF-16 surrogate pair across Lark text fields.
+    const last = serialized.charCodeAt(end - 1);
+    if (end < serialized.length && last >= 0xD800 && last <= 0xDBFF) end--;
+    chunks.push(serialized.slice(start, end));
+    start = end;
+  }
+  if (chunks.length > PRODUCT_CHUNK_FIELDS.length) {
+    throw new Error('Product details exceed storage capacity (' + serialized.length + ' characters). No product data was truncated.');
+  }
+  // Explicitly clear unused chunks when replacing a larger previous upload.
+  return { productsJsonParts: String(chunks.length), ...Object.fromEntries(PRODUCT_CHUNK_FIELDS.map((name, i) => [name, chunks[i] || ''])) };
+}
+function readProducts(fields) {
+  const rawCount = textVal(fields.productsJsonParts).trim();
+  if (!rawCount) return JSON.parse(textVal(fields.productsJson) || '[]');
+  const count = Number(rawCount);
+  if (!Number.isInteger(count) || count < 1 || count > PRODUCT_CHUNK_FIELDS.length) throw new Error('Invalid product chunk count');
+  const chunks = PRODUCT_CHUNK_FIELDS.slice(0, count).map(name => textVal(fields[name]));
+  if (chunks.some(chunk => !chunk)) throw new Error('Missing product data chunk');
+  const products = JSON.parse(chunks.join(''));
+  if (!Array.isArray(products)) throw new Error('Invalid product data');
+  return products;
+}
+
 function sessionToFields(s, email) {
   return {
     roomId: s.room, date: s.date, creator: s.creator, shop: s.shop, durationSec: s.dur || 0, slices: s.nslice || 0,
@@ -422,7 +458,7 @@ function sessionToFields(s, email) {
     newFollowers: s['New followers'] || 0,
     adSpend: s.adSpend == null ? '' : String(s.adSpend), avgViewDur: s.avgViewDur == null ? '' : String(s.avgViewDur),
     ratesJson: JSON.stringify({ err: s['L_Enter room rate'] || [], ctr: s['L_CTR'] || [], ctor: s['L_CTOR (SKU orders)'] || [], gpm: s['L_GPM'] || [], viewers: s['L_Viewers'] || [], views: s['L_Views'] || [] }),
-    productsJson: JSON.stringify(s.products || []), sourceJson: JSON.stringify(s.source || {}), profileJson: JSON.stringify(s.profile || {}),
+    ...productFields(s.products), sourceJson: JSON.stringify(s.source || {}), profileJson: JSON.stringify(s.profile || {}),
     hostsJson: JSON.stringify(s.hosts || []), startTime: s.startTime || '', endTime: s.endTime || '',
     poc: s.poc || '', hoursWaived: Number(s.hoursWaived) || 0, campaign: s.campaign || '',
     auctionJson: JSON.stringify(s.auction || {}),
@@ -432,7 +468,7 @@ function sessionToFields(s, email) {
 function recordToSession(f) {
   let rates = {}, products = [], source = {}, profile = {}, hosts = [], auction = {};
   try { rates = JSON.parse(textVal(f.ratesJson) || '{}'); } catch (e) {}
-  try { products = JSON.parse(textVal(f.productsJson) || '[]'); } catch (e) {}
+  products = readProducts(f);
   try { source = JSON.parse(textVal(f.sourceJson) || '{}'); } catch (e) {}
   try { profile = JSON.parse(textVal(f.profileJson) || '{}'); } catch (e) {}
   try { hosts = JSON.parse(textVal(f.hostsJson) || '[]'); } catch (e) {}
@@ -1074,6 +1110,7 @@ export default {
         if (!session || !session.room || !(session.shop || session.creator)) return json({ error: 'bad session (need room + shop or creator)' }, 400, origin);
         const projectId = session.shop || session.creator;
         if (!can(me.upload, projectId)) return json({ error: 'no upload permission for this project' }, 403, origin);
+        const fields = sessionToFields(session, me.email); // Validate size before provisioning or writing.
         const tableId = await ensureProjectTable(env, projectId, session.creator);
         const existing = await findByField(env, tableId, 'roomId', session.room);
         // UPSERT, not reject-on-duplicate: re-uploading the same Room ID used to be silently
@@ -1082,7 +1119,6 @@ export default {
         // showing the original values because the edit never reached Bitable. Same Room ID always
         // means the same live session, so overwriting is safe (no legitimate case produces two
         // different metric sets for one Room ID) and lets edits actually take effect.
-        const fields = sessionToFields(session, me.email);
         try {
           if (existing) await updateRecord(env, tableId, existing.record_id, fields);
           else await createRecord(env, tableId, fields);
