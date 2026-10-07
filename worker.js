@@ -1131,6 +1131,44 @@ export default {
         return json({ ok: true, duplicate: false, updated: !!existing }, 200, origin);
       }
 
+      /* POC-entered client P&L assumptions; session facts and billing remain separate. */
+      if (path === '/project/pnl-inputs' && request.method === 'GET') {
+        const projectId = url.searchParams.get('project');
+        if (!projectId) return json({error:'missing project'},400,origin);
+        if (!can(me.view,projectId) && me.role!=='admin') return json({error:'forbidden'},403,origin);
+        const reg=await findByField(env,env.REGISTRY_TABLE_ID,'projectId',projectId);
+        if(!reg)return json({error:'project not found'},404,origin);
+        const days=JSON.parse(textVal(reg.fields.pnlInputsJson)||'{}');
+        return json({days,version:textVal(reg.fields.pnlInputsVersion)},200,origin);
+      }
+      if (path === '/project/pnl-inputs' && request.method === 'POST') {
+        const {projectId,days,version}=await request.json();
+        if(typeof projectId!=='string'||!projectId)return json({error:'missing project'},400,origin);
+        if(!can(me.upload,projectId)&&me.role!=='admin')return json({error:'Upload permission is required to save P&L inputs.'},403,origin);
+        if(!days||typeof days!=='object'||Array.isArray(days)||Object.keys(days).length>366)return json({error:'Invalid daily P&L inputs'},400,origin);
+        const clean=Object.create(null),limits={discount:99.99,cogs:100,shipping:100,auctionCostPct:100,gift:1000000,giftShip:1000000,giftHourly:10000};
+        for(const [date,values] of Object.entries(days)){
+          if(!validReportDate(date)||!values||typeof values!=='object'||Array.isArray(values))return json({error:'Invalid P&L date or inputs'},400,origin);
+          clean[date]={};
+          for(const [key,max] of Object.entries(limits)){
+            const value=values[key];
+            if(value==null){return json({error:date+': missing '+key},400,origin);}
+            if(typeof value!=='number'||!Number.isFinite(value)||value<0||value>max)return json({error:date+': invalid '+key},400,origin);
+            clean[date][key]=value;
+          }
+        }
+        await ensureFieldsList(env,env.REGISTRY_TABLE_ID,[['pnlInputsJson',TXT],['pnlInputsVersion',TXT],['pnlUpdatedAt',TXT],['pnlUpdatedBy',TXT]]);
+        const reg=await findByField(env,env.REGISTRY_TABLE_ID,'projectId',projectId);
+        if(!reg)return json({error:'project not found'},404,origin);
+        if((version||'')!==textVal(reg.fields.pnlInputsVersion))return json({error:'P&L inputs changed since you opened this panel. Close and reopen it before saving.'},409,origin);
+        const stored=JSON.parse(textVal(reg.fields.pnlInputsJson)||'{}');
+        const serialized=JSON.stringify({...stored,...clean});
+        if(serialized.length>90000)return json({error:'Saved P&L inputs exceed the project storage limit. Existing data has not been changed.'},413,origin);
+        const next=crypto.randomUUID();
+        await updateRecord(env,env.REGISTRY_TABLE_ID,reg.record_id,{pnlInputsJson:serialized,pnlInputsVersion:next,pnlUpdatedAt:new Date().toISOString(),pnlUpdatedBy:me.email||me.openId});
+        return json({ok:true,version:next},200,origin);
+      }
+
       /* ----- project settings: pricing (flat fee / commission, simple or tiered) + contract archive ----- */
       if (path === '/project/settings' && request.method === 'GET') {
         const projectId = url.searchParams.get('project');
