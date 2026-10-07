@@ -272,6 +272,20 @@ body.mgmt .pv-only{display:none!important}
 #previewBar .btn{text-transform:none;letter-spacing:0}
 body.previewing{padding-bottom:46px}
 body.previewing #gate{display:none!important}
+
+#pnlModal .modalbox{width:min(1500px,97vw);max-height:94vh;overflow:auto}
+#pnlModal fieldset{border:0;padding:0;margin:0;min-width:0}
+#pnlModal [hidden]{display:none!important}
+#pnlModal .pnl-controls{display:flex;gap:12px;align-items:end;flex-wrap:wrap;margin:14px 0}
+#pnlModal .pnl-controls label,#pnlModal #pnlBulk label{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--muted)}
+#pnlModal #pnlBulk{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:14px 0}
+#pnlModal input{width:130px}#pnlModal #pnlBulk input{width:100%}
+#pnlModal th{white-space:normal;min-width:140px}#pnlModal th:first-child{min-width:200px}
+#pnlModal td:first-child{text-align:left}#pnlModal .pnl-em{font-weight:700;color:var(--neon)}
+#pnlMessage{white-space:pre-wrap;margin:12px 0;color:var(--risk)}
+#pnlModal .scroll{max-height:47vh;margin-top:14px;border:1px solid var(--line)}
+#pnlModal #pnlResult .scroll{max-height:60vh}#pnlModal select{width:auto;margin:0}
+
 </style>
 </head>
 <body>
@@ -290,6 +304,7 @@ body.previewing #gate{display:none!important}
     <div class="spacer"></div>
     <button class="btn sm admin-only" id="adminBtn">Admin</button>
     <button class="btn sm pv-only" id="projSettingsBtn">Project Settings</button>
+    <button class="btn sm pv-only" id="pnlButton">Generate P&amp;L</button>
     <label class="lb pv-only">Project</label>
     <select id="proj" class="pv-only"></select>
     <span class="pill" id="dbstat">—</span>
@@ -537,6 +552,21 @@ body.previewing #gate{display:none!important}
   </div>
 </div></div>
 
+
+<div class="modal" id="pnlModal" role="dialog" aria-modal="true" aria-labelledby="pnlTitle">
+ <div class="modalbox"><div class="mh"><strong id="pnlTitle">Client LIVE P&amp;L</strong><button id="pnlClose" class="btn sm">Close</button></div>
+ <div id="pnlMessage" role="status"></div><button class="btn primary" id="pnlSettings" hidden>Go to Project Settings</button>
+ <fieldset id="pnlBody" hidden>
+  <div class="pnl-controls"><label>Period<select id="pnlMode"><option value="daily">Daily</option><option value="weekly">Weekly (Mon–Sun)</option><option value="monthly">Monthly</option><option value="custom">Custom range</option></select></label><label>Date / week / month containing<input type="date" id="pnlAnchor"></label><label>Start date<input type="date" id="pnlStart"></label><label>End date<input type="date" id="pnlEnd"></label></div>
+  <p class="mini">Starts on the latest uploaded live date. Choose another date for today's P&amp;L. Source metrics and agency fees are read from uploaded sessions and Project Settings. Tiered pricing uses each calendar month's uploaded totals; rates may change as more sessions are uploaded.</p>
+  <strong>Cost assumptions</strong><div class="mini">Enter estimates below and apply them to the selected streaming dates, or edit dates individually. Previously saved inputs are loaded automatically. Enter 0 explicitly for a zero cost.</div>
+  <div id="pnlBulk"></div><button class="btn" id="pnlApply">Apply filled inputs to selected dates</button>
+  <p class="mini">COGS and shipping use pre-discount GMV. Auction Cost uses GMV before LIVE Discount × the POC's Auction Cost %. Enter 0 if not applicable. Giveaways = (product cost + shipping per gift) × live hours × giveaways per hour. Platform commission is fixed at 6%. All costs are estimates entered as positive amounts.</p>
+  <div class="scroll"><table id="pnlInputs"></table></div>
+  <div class="pnl-controls"><button class="btn primary" id="pnlGenerate">Generate P&amp;L</button><button class="btn" id="pnlDownload" disabled>Download Excel</button><span class="mini">Generation saves inputs for each streaming date. Editing inputs requires upload permission.</span></div>
+  <div id="pnlResult"></div>
+ </fieldset></div>
+</div>
 <script>
 /* ================= config ================= */
 const SUM_COLS=['Attributed GMV','Attributed items sold','Total {country} viewers','LIVE impression','Views','Product Impressions','Product Clicks','Likes','Shares','Comments','New followers','Viewers','Customers'];
@@ -2210,6 +2240,194 @@ document.getElementById('clr').onclick=()=>{ if(confirm('Clear the local databas
 
 /* ================= init ================= */
 boot();
+
+/* Client-side estimated LIVE P&L. All costs are entered as positive amounts. */
+const PNL_INPUTS=[
+  ['discount','LIVE Discount (%)',99.99],['cogs','COGS (%)',100],['shipping','Shipping Cost (%)',100],
+  ['auctionCostPct','Auction Cost (%)',100],['gift','Giveaway Product Cost / Unit ($)',1000000],['giftShip','Giveaway Shipping Cost / Unit ($)',1000000],['giftHourly','Giveaways per Hour',10000]
+];
+const PNL_PRICING_REQUIRED='Please configure the service fee and commission structure in Project Settings before generating the P&L.';
+let PNL_STATE=null,PNL_LOADING=false;
+function pnlNumber(v){return v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v))&&Number(v)>=0;}
+function pnlPricingValid(p){
+  if(!p||!p.fee||!p.commission)return false;
+  return [[p.fee,'perHour','fee'],[p.commission,'pct','pct']].every(([v,simple,rate])=>{
+    if(v.mode==='simple')return pnlNumber(v[simple])&&(rate!=='pct'||Number(v[simple])<=100);
+    if(v.mode!=='tiered'||!Array.isArray(v.tiers)||!v.tiers.length)return false;
+    const tiers=[...v.tiers].sort((a,b)=>Number(a.from)-Number(b.from));
+    return tiers.every((t,i)=>pnlNumber(t.from)&&pnlNumber(t[rate])&&(rate!=='pct'||Number(t[rate])<=100)&&
+      (t.to==null||t.to===''||(pnlNumber(t.to)&&Number(t.to)>Number(t.from)))&&
+      (!i||((tiers[i-1].to!=null&&tiers[i-1].to!=='')&&Number(tiers[i-1].to)<=Number(t.from))));
+  });
+}
+function pnlRate(plan,amount,simple,rate){
+  if(plan.mode==='simple')return Number(plan[simple]);
+  const hits=plan.tiers.filter(t=>amount>=Number(t.from)&&(t.to==null||t.to===''||amount<Number(t.to)));
+  if(hits.length!==1)throw Error('No unique pricing tier matches this month. Please update Project Settings.');
+  return Number(hits[0][rate]);
+}
+function pnlDateList(start,end){
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(start)||!/^\d{4}-\d{2}-\d{2}$/.test(end))throw Error('Choose valid start and end dates.');
+  const count=daysDiff(start,end)+1;if(!Number.isInteger(count)||count<1||count>366)throw Error('Choose a date range of 1–366 days.');
+  return Array.from({length:count},(_,i)=>addDays(start,i));
+}
+function pnlPeriod(mode,anchor){
+  if(mode==='daily')return {start:anchor,end:anchor};
+  if(mode==='weekly'){const dow=new Date(anchor+'T00:00:00Z').getUTCDay(),start=addDays(anchor,-((dow+6)%7));return {start,end:addDays(start,6)};}
+  const start=anchor.slice(0,7)+'-01',d=new Date(start+'T00:00:00Z');d.setUTCMonth(d.getUTCMonth()+1);return {start,end:addDays(d.toISOString().slice(0,10),-1)};
+}
+function pnlSource(sessions,date,pricing){
+  const ss=sessions.filter(s=>s.date===date),sum=fn=>ss.reduce((a,s)=>a+(Number(fn(s))||0),0),month=sessions.filter(s=>s.date.slice(0,7)===date.slice(0,7));
+  const bill=s=>Math.max(0,(Number(s.dur)||0)/3600-(Number(s.hoursWaived)||0));
+  const v={date,sessions:ss.length,gmv:sum(s=>s['Attributed GMV']),hours:sum(s=>s.dur)/3600,billed:sum(bill),orders:sum(s=>s.orders),auctionGmv:sum(s=>Object.values(s.auction||{}).reduce((a,p)=>a+(Number(p.gmv)||0),0))};
+  v.adSpend=ss.every(s=>pnlNumber(s.adSpend))?sum(s=>s.adSpend):null;
+  if(!ss.length){v.feeRate=0;v.commRate=0;return v;}
+  v.feeRate=pnlRate(pricing.fee,month.reduce((a,s)=>a+bill(s),0),'perHour','fee');
+  v.commRate=pnlRate(pricing.commission,month.reduce((a,s)=>a+(Number(s['Attributed GMV'])||0),0),'pct','pct');
+  return v;
+}
+function pnlCalculate(source,input){
+  const s={...source,input:{...input}};
+  if(s.sessions){
+    for(const [key,label,max] of PNL_INPUTS){
+      if(!pnlNumber(input[key])||Number(input[key])>max)throw Error(s.date+': enter '+label+' (0–'+max+').');
+    }
+    if(s.adSpend==null)throw Error(s.date+': Ad Cost is missing for one or more sessions. Update the uploaded session data first; enter 0 if no ads ran.');
+  }
+  const n=k=>Number(input[k])||0;
+  s.before=s.sessions?s.gmv/(1-n('discount')/100):0;s.hourly=s.hours?s.gmv/s.hours:null;
+  s.cogs=-s.before*n('cogs')/100;s.shipping=-s.before*n('shipping')/100;s.shipOrder=s.orders?s.shipping/s.orders:null;
+  s.auction=-s.before*n('auctionCostPct')/100;s.giftCount=s.hours*n('giftHourly');s.giveaway=-(n('gift')+n('giftShip'))*s.giftCount;
+  s.platform=-s.gmv*.06;s.ad=-s.adSpend;s.roi=s.adSpend>0?s.gmv/s.adSpend:null;
+  s.service=-s.billed*s.feeRate;s.commission=-s.gmv*s.commRate/100;s.agency=s.service+s.commission;
+  s.total=s.cogs+s.shipping+s.auction+s.giveaway+s.platform+s.ad+s.agency;s.profit=s.gmv+s.total;s.margin=s.gmv?s.profit/s.gmv:null;
+  return s;
+}
+const PNL_ROWS=[
+  ['Session','sessions','int'],['Attr. GMV ($)','gmv','money'],['GMV before LIVE Discount ($)','before','money'],['LIVE Duration','hours','num'],['Hourly GMV','hourly','money'],['Total Attr. Orders','orders','int'],
+  ['COGS','cogs','money'],['Shipping Cost','shipping','money'],['Shipping Cost per Order ($)','shipOrder','money'],['Auction Cost (estimated)','auction','money'],['Giveaway Expenses ($)','giveaway','money'],['Giveaway Product COGS + Shipping','giveaway','money'],
+  ['Platform Commission ($)','platform','money'],['Platform Commission %','platformRate','pct'],['Ad Cost ($)','ad','money'],['LIVE GMV Max','ad','money'],['Ads ROI','roi','num'],['Agency Cost ($)','agency','money'],['NBG Service Fee','service','money'],['NBG Service Fee per Hour','feeRate','money'],['NBG Commission','commission','money'],['Total Cost','total','money'],['EBIT Profit (estimated)','profit','money'],['EBIT %','margin','pct']
+];
+function pnlTotal(days){
+  const t={sessions:days.reduce((a,d)=>a+d.sessions,0)};
+  for(const k of ['gmv','before','hours','orders','cogs','shipping','auction','giveaway','platform','ad','agency','service','commission','total','profit','billed','auctionGmv','giftCount'])t[k]=days.reduce((a,d)=>a+d[k],0);
+  t.hourly=t.hours?t.gmv/t.hours:null;t.shipOrder=t.orders?t.shipping/t.orders:null;t.roi=t.ad<0?t.gmv/-t.ad:null;t.margin=t.gmv?t.profit/t.gmv:null;t.feeRate=t.billed?-t.service/t.billed:null;
+  return t;
+}
+function pnlValue(d,key){return key==='platformRate'?.06:d[key];}
+function pnlFormat(v,kind){return v==null?'—':kind==='money'?F.money2(v):kind==='pct'?(v*100).toFixed(2)+'%':kind==='int'?String(v):v.toFixed(2);}
+function pnlError(message){document.getElementById('pnlMessage').textContent=message;}
+async function pnlOpen(){
+  if(PNL_LOADING)return;
+  const pid=document.getElementById('proj').value;if(!pid)return;
+  PNL_LOADING=true;document.getElementById('pnlButton').disabled=true;
+  const box=document.getElementById('pnlModal');box.style.display='flex';document.getElementById('pnlBody').hidden=true;document.getElementById('pnlSettings').hidden=true;document.getElementById('pnlTitle').textContent='Client LIVE P&L';pnlError('Loading project data…');
+  try{
+    const settings=ONLINE()?await api('/project/settings?project='+encodeURIComponent(pid)):loadPricingLocal()[pid]||{};
+    if(!pnlPricingValid(settings.pricing)){PNL_STATE=null;pnlError(PNL_PRICING_REQUIRED);document.getElementById('pnlSettings').hidden=false;return;}
+    const sessions=await getSessions(pid);if(!sessions.length)throw Error('No uploaded sessions for this project yet.');
+    const saved=ONLINE()?await api('/project/pnl-inputs?project='+encodeURIComponent(pid)):JSON.parse(localStorage.getItem('pnl_inputs:'+pid)||'null')||{};
+    PNL_STATE={pid,name:document.getElementById('proj').selectedOptions[0]?.text||pid,pricing:settings.pricing,sessions,inputs:saved.days||{},version:saved.version||'',editable:!ONLINE()||canUpload(pid)||SESSION?.role==='admin',report:null,busy:false,dirty:false};
+    document.getElementById('pnlTitle').textContent='Client LIVE P&L — '+PNL_STATE.name;
+    document.getElementById('pnlAnchor').value=[...sessions].map(s=>s.date).sort().pop();document.getElementById('pnlMode').value='daily';
+    document.getElementById('pnlBulk').innerHTML=PNL_INPUTS.map(([k,label,max])=>`<label>${label}<input data-pnl-bulk="${k}" type="number" min="0" max="${max}" step="any" placeholder="Required" ${PNL_STATE.editable?'':'disabled'}></label>`).join('');
+    document.getElementById('pnlBody').hidden=false;document.getElementById('pnlResult').innerHTML='';document.getElementById('pnlDownload').disabled=true;document.getElementById('pnlApply').disabled=!PNL_STATE.editable;
+    pnlError('');pnlSelectPeriod();
+  }catch(e){pnlError(e.message);}finally{PNL_LOADING=false;document.getElementById('pnlButton').disabled=false;}
+}
+function pnlInvalidate(){if(!PNL_STATE)return;PNL_STATE.report=null;document.getElementById('pnlDownload').disabled=true;document.getElementById('pnlResult').innerHTML='';}
+function pnlSelectPeriod(){
+  const mode=document.getElementById('pnlMode').value,anchor=document.getElementById('pnlAnchor').value;
+  document.getElementById('pnlAnchor').disabled=mode==='custom';
+  for(const id of ['pnlStart','pnlEnd'])document.getElementById(id).disabled=mode!=='custom';
+  if(mode!=='custom'&&anchor){const r=pnlPeriod(mode,anchor);document.getElementById('pnlStart').value=r.start;document.getElementById('pnlEnd').value=r.end;}
+  pnlRenderInputs();
+}
+function pnlSelectedDates(){return pnlDateList(document.getElementById('pnlStart').value,document.getElementById('pnlEnd').value);}
+function pnlRenderInputs(){
+  const p=PNL_STATE;if(!p)return;pnlInvalidate();
+  try{
+    const dates=pnlSelectedDates();p.sources=dates.map(d=>pnlSource(p.sessions,d,p.pricing));
+    const head='<tr><th>Date</th><th>Sessions</th>'+PNL_INPUTS.map(f=>'<th>'+f[1]+'</th>').join('')+'</tr>';
+    const rows=p.sources.map(d=>'<tr><td>'+d.date+'</td><td>'+(d.sessions||'No uploaded sessions')+'</td>'+PNL_INPUTS.map(([k,label,max])=>`<td><input aria-label="${label} ${d.date}" type="number" min="0" max="${max}" step="any" data-pnl-day="${d.date}" data-pnl-key="${k}" value="${escAttr(p.inputs[d.date]?.[k]??'')}" placeholder="Required" ${p.editable&&d.sessions?'':'disabled'}></td>`).join('')+'</tr>').join('');
+    document.getElementById('pnlInputs').innerHTML='<thead>'+head+'</thead><tbody>'+rows+'</tbody>';document.getElementById('pnlGenerate').disabled=!p.sources.some(d=>d.sessions);pnlError('');
+  }catch(e){document.getElementById('pnlInputs').innerHTML='';document.getElementById('pnlGenerate').disabled=true;if(e.message.includes('pricing tier'))document.getElementById('pnlSettings').hidden=false;pnlError(e.message);}
+}
+async function pnlGenerate(){
+  const p=PNL_STATE;if(!p||p.busy)return;
+  p.busy=true;document.getElementById('pnlBody').disabled=true;pnlError('Generating…');
+  try{
+    // Re-read pricing and source data; project permissions are checked by the Worker.
+    if(ONLINE()){
+      const settings=await api('/project/settings?project='+encodeURIComponent(p.pid));
+      if(!pnlPricingValid(settings.pricing)){document.getElementById('pnlSettings').hidden=false;throw Error(PNL_PRICING_REQUIRED);}
+      p.pricing=settings.pricing;delete _sessCache[p.pid];p.sessions=await getSessions(p.pid);
+    }
+    const dates=pnlSelectedDates(),sources=dates.map(date=>pnlSource(p.sessions,date,p.pricing));
+    if(!sources.some(s=>s.sessions))throw Error('No uploaded sessions in the selected date range.');
+    const days=sources.map(s=>pnlCalculate(s,p.inputs[s.date]||{}));
+    if(p.editable){
+      const selected=Object.fromEntries(days.filter(d=>d.sessions).map(d=>[d.date,p.inputs[d.date]]));
+      const result=ONLINE()?await api('/project/pnl-inputs',{method:'POST',body:JSON.stringify({projectId:p.pid,days:selected,version:p.version})}):{version:String(Date.now())};
+      if(!ONLINE())localStorage.setItem('pnl_inputs:'+p.pid,JSON.stringify({days:p.inputs,version:result.version}));
+      p.version=result.version;p.dirty=false;
+    }
+    p.report={days,total:pnlTotal(days),start:dates[0],end:dates[dates.length-1],name:p.name,pricing:p.pricing};
+    const table='<div class="scroll"><table><thead><tr><th>Metric</th>'+days.map(d=>'<th>'+d.date+(d.sessions?'':'<br>No uploaded sessions')+'</th>').join('')+'<th>Total / weighted rate</th></tr></thead><tbody>'+PNL_ROWS.map(([label,k,kind])=>'<tr class="'+(['gmv','total','profit','margin'].includes(k)?'pnl-em':'')+'"><td>'+label+'</td>'+[...days,p.report.total].map(d=>'<td>'+(!d.sessions?'—':pnlFormat(pnlValue(d,k),kind))+'</td>').join('')+'</tr>').join('')+'</tbody></table></div>';
+    document.getElementById('pnlResult').innerHTML=table;document.getElementById('pnlDownload').disabled=false;
+    pnlError('Generated. '+(p.editable?'Inputs saved for each streaming date. ':'')+days.filter(d=>!d.sessions).length+' date(s) have no uploaded sessions; confirm data coverage.');
+  }catch(e){pnlInvalidate();pnlError(e.message);}finally{p.busy=false;document.getElementById('pnlBody').disabled=false;}
+}
+function pnlBuildWorkbook(report){
+  const {days,total}=report;
+  const data=[['Client LIVE P&L — '+report.name],['Estimated costs. Auction Cost is a POC estimate against GMV before LIVE Discount. Giveaway frequency is entered by the POC.'],['Range: '+report.start+' to '+report.end+'; dates without uploads excluded from totals. Refunds, taxes and unlisted overhead excluded.'],['Date',...days.map(d=>d.date),'Total / weighted rate']];
+  const first=5,row={};
+  PNL_ROWS.forEach(([label,key])=>{if(!row[key])row[key]=data.length+1;data.push([label,...days.map(d=>d.sessions?(pnlValue(d,key)??'N/A'):'No data'),pnlValue(total,key)??'N/A']);});
+  data.push(['Inputs and calculation bases — costs entered as positive numbers']);
+  const inputs={};PNL_INPUTS.forEach(([key,label])=>{inputs[key]=data.length+1;data.push([label,...days.map(d=>d.input[key]??null)]);});
+  const bases={};for(const [key,label] of [['auctionGmv','Auction GMV ($; reference only)'],['giftCount','Giveaway count (duration × giveaways per hour)'],['billed','Billable hours after waivers'],['feeRate','NBG hourly rate from project pricing'],['commRate','NBG commission % from project pricing'],['adSpend','Uploaded ad spend ($)']]){bases[key]=data.length+1;data.push([label,...days.map(d=>d.sessions?d[key]:null)]);}
+  const ws=XLSX.utils.aoa_to_sheet(data),totalCol=XLSX.utils.encode_col(days.length+1),last=XLSX.utils.encode_col(days.length);
+  const put=(col,r,formula,value,kind)=>{ws[col+r]={f:formula,t:typeof value==='number'?'n':'s',v:value??'N/A',z:kind==='pct'?'0.00%':kind==='int'?'0':'#,##0.00;[Red]-#,##0.00'};};
+  days.forEach((d,i)=>{
+    const col=XLSX.utils.encode_col(i+1),r=k=>col+row[k],input=k=>col+inputs[k],base=k=>col+bases[k];
+    if(!d.sessions)return;
+    const f={before:`IF(AND(ISNUMBER(${input('discount')}),${input('discount')}>=0,${input('discount')}<100),${r('gmv')}/(1-${input('discount')}/100),"Missing input")`,hourly:`IF(${r('hours')}>0,${r('gmv')}/${r('hours')},"N/A")`,cogs:`-${r('before')}*${input('cogs')}/100`,shipping:`-${r('before')}*${input('shipping')}/100`,shipOrder:`IF(${r('orders')}>0,${r('shipping')}/${r('orders')},"N/A")`,auction:`-${r('before')}*${input('auctionCostPct')}/100`,giveaway:`-(${input('gift')}+${input('giftShip')})*${base('giftCount')}`,platform:`-${r('gmv')}*${r('platformRate')}`,platformRate:'6/100',ad:`-${base('adSpend')}`,roi:`IF(${base('adSpend')}>0,${r('gmv')}/${base('adSpend')},"N/A")`,service:`-${base('billed')}*${base('feeRate')}`,feeRate:base('feeRate'),commission:`-${r('gmv')}*${base('commRate')}/100`,agency:`${r('service')}+${r('commission')}`,total:[r('cogs'),r('shipping'),r('auction'),r('giveaway'),r('platform'),r('ad'),r('agency')].join('+'),profit:`${r('gmv')}+${r('total')}`,margin:`IF(${r('gmv')}>0,${r('profit')}/${r('gmv')},"N/A")`};
+    // Required cost inputs must not silently turn into zero when deleted in Excel.
+    for(const [key,required] of Object.entries({cogs:['cogs'],shipping:['shipping'],auction:['auctionCostPct'],giveaway:['gift','giftShip','giftHourly']}))if(required.length)f[key]=`IF(AND(${required.map(k=>`ISNUMBER(${input(k)})`).join(',')}),${f[key]},"Missing input")`;
+    PNL_ROWS.forEach(([label,k,kind],j)=>{if(f[k])put(col,first+j,f[k],pnlValue(d,k),kind);else ws[col+(first+j)].z=kind==='int'?'0':'#,##0.00';});
+    put(col,bases.giftCount,`${r('hours')}*${input('giftHourly')}`,d.giftCount,'num');
+  });
+  const tr=k=>totalCol+row[k],ratio={hourly:`IF(${tr('hours')}>0,${tr('gmv')}/${tr('hours')},"N/A")`,shipOrder:`IF(${tr('orders')}>0,${tr('shipping')}/${tr('orders')},"N/A")`,roi:`IF(${tr('ad')}<0,${tr('gmv')}/-${tr('ad')},"N/A")`,feeRate:`IF(SUM(B${bases.billed}:${last}${bases.billed})>0,-${tr('service')}/SUM(B${bases.billed}:${last}${bases.billed}),"N/A")`,margin:`IF(${tr('gmv')}>0,${tr('profit')}/${tr('gmv')},"N/A")`,platformRate:'6/100'};
+  const streaming=days.filter(d=>d.sessions).length;
+  PNL_ROWS.forEach(([label,k,kind],j)=>{const rr=first+j,range=`B${rr}:${last}${rr}`;put(totalCol,rr,ratio[k]||`IF(COUNT(${range})=${streaming},SUM(${range}),"Missing input")`,pnlValue(total,k),kind);});
+  XLSX.utils.sheet_add_aoa(ws,[['Calculation notes'],['LIVE discount applies to Attr. GMV to estimate pre-discount GMV. COGS and shipping use that pre-discount basis.'],['Auction Cost = GMV before LIVE Discount × POC-entered Auction Cost %; modeled estimate, not an observed expense.'],['Giveaway Product COGS + Shipping and LIVE GMV Max are breakdown rows, not additional charges.'],['Service fees use billable hours. Tiered rates use all uploaded calendar-month hours/GMV, not only the selected range; incomplete months are provisional.'],['Zero-ad ROI and zero-GMV margin are N/A. No-upload dates are not confirmed zero-activity dates.'],['Source: Live Dashboard uploaded sessions, saved Project Settings pricing, and POC-entered per-date assumptions.']],{origin:-1});
+  ws['!cols']=[{wch:48},...Array.from({length:days.length+1},()=>({wch:19}))];
+  ws['!rows']=[{hpt:24},{hpt:32},{hpt:30},{hpt:24}];
+  ws['!merges']=[0,1,2].map(r=>({s:{r,c:0},e:{r,c:days.length+1}}));
+  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Client P&L');wb.Workbook={CalcPr:{calcMode:'auto',fullCalcOnLoad:true}};return wb;
+}
+function pnlDownload(){const p=PNL_STATE;if(!p?.report)return;XLSX.writeFile(pnlBuildWorkbook(p.report),'Client-PnL-'+p.pid.replace(/[^a-z0-9_-]/gi,'_')+'-'+p.report.start+'-'+p.report.end+'.xlsx');}
+document.getElementById('pnlButton').onclick=pnlOpen;
+document.getElementById('pnlClose').onclick=()=>{if(PNL_LOADING||PNL_STATE?.busy)return;if(PNL_STATE?.dirty&&!confirm('Discard unsaved P&L inputs?'))return;document.getElementById('pnlModal').style.display='none';PNL_STATE=null;};
+document.getElementById('pnlSettings').onclick=()=>{document.getElementById('pnlModal').style.display='none';PNL_STATE=null;if(document.getElementById('projSettingsPanel').style.display!=='block')openProjSettings();};
+for(const id of ['pnlMode','pnlAnchor'])document.getElementById(id).onchange=pnlSelectPeriod;
+for(const id of ['pnlStart','pnlEnd'])document.getElementById(id).onchange=pnlRenderInputs;
+document.getElementById('pnlApply').onclick=()=>{
+  const p=PNL_STATE;if(!p?.editable)return;const values={};
+  for(const el of document.querySelectorAll('[data-pnl-bulk]'))if(el.value!==''){
+    const key=el.dataset.pnlBulk,spec=PNL_INPUTS.find(f=>f[0]===key);if(!pnlNumber(el.value)||Number(el.value)>spec[2]){pnlError('Invalid '+spec[1]);return;}values[key]=Number(el.value);
+  }
+  for(const d of p.sources||[])if(d.sessions)p.inputs[d.date]={...p.inputs[d.date],...values};
+  p.dirty=true;pnlRenderInputs();
+};
+document.getElementById('pnlInputs').addEventListener('change',event=>{
+  const el=event.target,p=PNL_STATE,key=el.dataset.pnlKey,date=el.dataset.pnlDay;if(!key||!p?.editable)return;
+  const spec=PNL_INPUTS.find(f=>f[0]===key);if(el.value!==''&&(!pnlNumber(el.value)||Number(el.value)>spec[2])){pnlError('Invalid '+spec[1]);el.value=p.inputs[date]?.[key]??'';return;}
+  p.inputs[date]={...p.inputs[date],[key]:el.value===''?null:Number(el.value)};p.dirty=true;pnlInvalidate();
+});
+document.getElementById('pnlGenerate').onclick=pnlGenerate;
+document.getElementById('pnlDownload').onclick=pnlDownload;
+
 </script>
 </body>
 </html>
