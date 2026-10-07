@@ -1471,6 +1471,8 @@ function auctionStatsByName(ss){
   });
   return out;
 }
+function auctionASP(a){ return Number.isFinite(a.gmv)&&Number.isFinite(a.itemsSold)&&a.itemsSold>0 ? a.gmv/a.itemsSold : null; }
+function compareAuctionASP(a,b){ const av=auctionASP(a[1]),bv=auctionASP(b[1]); return (av==null)-(bv==null)||(av==null?0:bv-av)||(b[1].gmv-a[1].gmv)||a[0].localeCompare(b[0]); }
 function auctStatBlurb(a){ if(!a)return ''; const pct=(a.unsoldRate*100), warn=pct>=30;
   return `<span class="mini auctstat">🔨 ${a.rounds} round${a.rounds===1?'':'s'} · avg bid $${a.avgStartBid.toFixed(0)}→$${a.avgSalePrice.toFixed(0)} (${a.upliftPct>=0?'+':''}${(a.upliftPct*100).toFixed(0)}%) · ~${a.avgBidders.toFixed(1)} bidders/round · <span class="${warn?'warnc':''}">流拍率 ${pct.toFixed(0)}%</span> (${a.unsoldRounds}/${a.rounds} rounds no winner)</span>`; }
 function renderProducts(sessions,R){
@@ -1510,17 +1512,17 @@ function renderProducts(sessions,R){
   const heroRows=hero.length?hero.map(h=>`<div class="clsrow-wrap"><div class="clsrow"><span class="pn">${productLabel(h.p)}</span><span class="pv">${M(h.pr)} → ${M(h.c)}</span><span class="tg ${h.tag}">${tagTxt[h.tag]}</span>${auctTag(h.p)}</div>${auctLine(h.p)}</div>`).join(''):'<div class="emptyc">None</div>';
   const potRows=potential.length?potential.map(h=>`<div class="clsrow-wrap"><div class="clsrow"><span class="pn">${productLabel(h.p)}</span><span class="pv"><span class="arrowg">${M(h.pr)} → ${M(h.c)}</span></span>${auctTag(h.p)}</div>${auctLine(h.p)}</div>`).join(''):'<div class="emptyc">None</div>';
   const decRows=declining.length?declining.map(h=>`<div class="clsrow-wrap"><div class="clsrow"><span class="pn">${productLabel(h.p)}</span><span class="pv"><span class="arrowr">${M(h.pr)} → ${M(h.c)}</span></span>${auctTag(h.p)}</div>${auctLine(h.p)}</div>`).join(''):'<div class="emptyc">None</div>';
-  // Auction Products — every auctioned SKU ranked by GMV this period, same clsgrp/clsrow visual
+  // Auction Products — every auctioned SKU ranked by ASP descending this period, same clsgrp/clsrow visual
   // language as Hero/Potential/Declining above, rather than a separate wide table. Most auction
   // listings are long-tail (rarely crack the Top-5-half-the-days bar used for hero/decline), so this
   // group exists to give them visibility even when they don't otherwise appear above.
-  const auctList=Object.entries(auctStats).sort((a,b)=>b[1].gmv-a[1].gmv);
-  const auctRows=auctList.length?auctList.map(([n,a])=>`<div class="clsrow-wrap"><div class="clsrow"><span class="pn">${String(n).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}</span><span class="pv">${M(a.gmv)}</span><span class="tg auct">AUCTION</span></div>${auctStatBlurb(a)?`<div class="auctline">${auctStatBlurb(a)}</div>`:''}</div>`).join(''):'<div class="emptyc">None</div>';
+  const auctList=Object.entries(auctStats).sort(compareAuctionASP);
+  const auctRows=auctList.length?auctList.map(([n,a])=>`<div class="clsrow-wrap"><div class="clsrow"><span class="pn">${String(n).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}</span><span class="pv">ASP ${auctionASP(a)==null?'—':F.money2(auctionASP(a))} · GMV ${M(a.gmv)}</span><span class="tg auct">AUCTION</span></div>${auctStatBlurb(a)?`<div class="auctline">${auctStatBlurb(a)}</div>`:''}</div>`).join(''):'<div class="emptyc">None</div>';
   document.getElementById('prodClass').innerHTML=
     `<div class="clsgrp clshero"><h4>★ Hero Products <span class="mini" style="text-transform:none;letter-spacing:0">in Top 5 &gt; half the days in BOTH periods · tagged HOT (+15%) / DECREASING (−15%)</span></h4>${heroRows}</div>`+
     `<div class="clsgrp clspot"><h4>▲ High-Potential Products <span class="mini" style="text-transform:none;letter-spacing:0">newly qualifying in Top 5 this period</span></h4>${potRows}</div>`+
     `<div class="clsgrp clsdec"><h4>▼ Declining Products <span class="mini" style="text-transform:none;letter-spacing:0">dropped out of Top 5 this period</span></h4>${decRows}</div>`+
-    (auctList.length?`<div class="clsgrp clsauct"><h4>🔨 Auction Products <span class="mini" style="text-transform:none;letter-spacing:0">ranked by GMV this period · from the auction-detail file(s) you uploaded · includes 流拍率 (rounds with no winner)</span></h4>${auctRows}</div>`:'');
+    (auctList.length?`<div class="clsgrp clsauct"><h4>🔨 Auction Products <span class="mini" style="text-transform:none;letter-spacing:0">ranked by ASP ↓ (auction GMV ÷ items sold) this period · from the auction-detail file(s) you uploaded · includes 流拍率 (rounds with no winner)</span></h4>${auctRows}</div>`:'');
 }
 
 function renderSourceFollow(sessions,R){
